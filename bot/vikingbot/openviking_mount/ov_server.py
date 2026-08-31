@@ -562,10 +562,13 @@ class VikingClient:
     ):
         """搜索资源"""
         kwargs: Dict[str, Any] = {"limit": limit}
+        options: Dict[str, Any] = {}
         if context_type is not None:
-            kwargs["context_type"] = context_type
+            options["context_type"] = context_type
         if filter is not None:
-            kwargs["filter"] = filter
+            options["filter"] = filter
+        if options:
+            kwargs["options"] = options
         if target_uri:
             return await self.client.find(query, target_uri=target_uri, **kwargs)
         return await self.client.find(query, **kwargs)
@@ -1167,10 +1170,10 @@ class VikingClient:
             if not self._is_not_found_error(exc):
                 raise
 
-        return await client.create_session(
-            session_id=session_id,
-            memory_policy=memory_policy,
-        )
+        create_kwargs: Dict[str, Any] = {"session_id": session_id}
+        if memory_policy is not None:
+            create_kwargs["options"] = {"memory_policy": memory_policy}
+        return await client.create_session(**create_kwargs)
 
     @staticmethod
     def _is_not_found_error(exc: Exception) -> bool:
