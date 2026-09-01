@@ -1170,10 +1170,10 @@ class VikingClient:
             if not self._is_not_found_error(exc):
                 raise
 
-        create_kwargs: Dict[str, Any] = {"session_id": session_id}
-        if memory_policy is not None:
-            create_kwargs["options"] = {"memory_policy": memory_policy}
-        return await client.create_session(**create_kwargs)
+        return await client.create_session(
+            session_id=session_id,
+            options={"memory_policy": memory_policy} if memory_policy is not None else None,
+        )
 
     @staticmethod
     def _is_not_found_error(exc: Exception) -> bool:

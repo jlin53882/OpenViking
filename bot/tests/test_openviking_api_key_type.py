@@ -1901,7 +1901,7 @@ async def test_viking_client_ensure_session_creates_after_legacy_not_found(monke
 
     async def _create_session(session_id=None, options=None):
         created.append((session_id, options))
-        return {"session_id": session_id, "options": options}
+        return {"session_id": session_id, "memory_policy": (options or {}).get("memory_policy")}
 
     monkeypatch.setattr(client.client, "get_session", _get_session)
     monkeypatch.setattr(client.client, "create_session", _create_session)
@@ -1911,10 +1911,7 @@ async def test_viking_client_ensure_session_creates_after_legacy_not_found(monke
         memory_policy={"strategy": "compact"},
     )
 
-    assert result == {
-        "session_id": "session-1",
-        "options": {"memory_policy": {"strategy": "compact"}},
-    }
+    assert result == {"session_id": "session-1", "memory_policy": {"strategy": "compact"}}
     assert created == [
         ("session-1", {"memory_policy": {"strategy": "compact"}}),
     ]
