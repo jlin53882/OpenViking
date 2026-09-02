@@ -613,7 +613,7 @@ Injecting context every turn used to mean searching per type, reading each hit b
 
 **Pipeline**:
 1. **L1 query understanding**: optional bounded intent expansion from the session's recent messages (at most 3 queries, timeout fuse, falls back to the original query)
-2. **L0 retrieval**: bucketed per `quotas`, or a single whole-scope search when quotas are off
+2. **L0 retrieval**: explicit per-bucket `quotas`, purpose-weighted retrieval with global backfill, or one whole-scope search when both are off
 3. **L2 assembly**: tier filling inside the token budget (everyone at their category's default tier first, then leftover budget deepens in score order); an oversized tier falls back instead of being truncated
 4. **L3 rewrite**: optional digest with URI citations (timeout fuse; on failure the unrewritten `rendered` is still returned; an exact `NO_RELEVANT_MEMORY` result is reported as `stats.rewrite="no_relevant"` so Coding Agent clients inject nothing instead of falling back to `rendered`)
 
@@ -625,7 +625,7 @@ Injecting context every turn used to mean searching per type, reading each hit b
 
 #### 2. Parameters
 
-**L0 retrieval domain**: `query`, `image_url`, `context_type`, `limit`, `score_threshold`, `filter`, `tags`, `since`/`until` behave as in list mode. `limit` applies only to quota-free retrieval. Once `purpose` or explicit `quotas` enables bucketed retrieval, the per-category quotas are the only candidate ceilings. `target_uri` is not supported in context mode yet (returns 400); `level` is ignored because `detail` governs tiers.
+**L0 retrieval domain**: `query`, `image_url`, `context_type`, `limit`, `score_threshold`, `filter`, `tags`, `since`/`until` behave as in list mode. `limit` is the global result ceiling (default `10`) for quota-free and purpose-driven retrieval. With `purpose`, the server scales the preset into a primary cross-domain pool, then backfills unused slots from compatible buckets before applying the global ceiling. Explicit `quotas` keep their absolute per-bucket contract and make `limit` inert. `target_uri` is not supported in context mode yet (returns 400); `level` is ignored because `detail` governs tiers.
 
 **L1 query understanding**
 
@@ -638,10 +638,10 @@ Injecting context every turn used to mean searching per type, reading each hit b
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `limit` | int | 10 | Candidate ceiling for quota-free retrieval only; ignored when `purpose` or `quotas` enables bucketed retrieval |
+| `limit` | int | 10 | Global result ceiling for quota-free and purpose-driven retrieval (1–1000); ignored only when explicit `quotas` are supplied |
 | `max_tokens` | int | 1600 | The single budget parameter, estimated with a CJK-aware heuristic (codepoint ≥ 0x3000 counts 1.5 tok/char, otherwise chars/4) |
-| `quotas` | object | None | Absolute per-bucket limits; keys are `events`/`entities`/`preferences`/`experiences`/`resources`/`skills`. Explicit quotas ignore `limit` |
-| `purpose` | `chat` \| `coding` | None | Enables six-domain bucket sampling with the absolute preset quotas below. Applies only when `quotas` is not given |
+| `quotas` | object | None | Absolute per-bucket limits; keys are `events`/`entities`/`preferences`/`experiences`/`resources`/`skills`, with a maximum positive total of 1000. Explicit quotas ignore `limit` |
+| `purpose` | `chat` \| `coding` | None | Enables server-owned cross-domain sampling using the preset weights below and the global `limit`. Applies only when `quotas` is not given |
 | `detail` | `abstract` \| `overview` \| `full` \| object | None | Requests one starting/maximum tier for every entry. Entries whose requested tier is unavailable or does not fit step down instead of being truncated. Omitted, each category takes its default tier (below). Also accepts a per-category object such as `{"events":"overview","preferences":"abstract"}`; categories left out keep their default. `"auto"` is a deprecated spelling and behaves as if omitted |
 | `dedup_turns` | int | 0 | Cooldown window in turns; needs `session_id`. Ledger lives at `{session_uri}/.recall_log.json` |
 | `exclude_uris` | string[] | [] | Stateless dedup fallback, up to 200 entries, unioned with `dedup_turns` |
@@ -657,7 +657,7 @@ Injecting context every turn used to mean searching per type, reading each hit b
 
 **Tier rules**
 
-- **Purpose presets**: `chat` uses `events:3, entities:3, preferences:1, experiences:1, resources:1, skills:1`; `coding` uses `events:1, entities:2, preferences:1, experiences:1, resources:3, skills:2`. These are absolute per-category ceilings, not weights. Results are deduplicated and globally sorted after gathering, but are not truncated by a second global `limit`
+- **Purpose presets**: `chat` uses `events:3, entities:3, preferences:1, experiences:1, resources:1, skills:1`; `coding` uses `events:1, entities:2, preferences:1, experiences:1, resources:3, skills:2`. The server treats these as relative primary-pool weights, scales them against `limit`, and backfills from compatible buckets when a filtered or sparse bucket cannot contribute. Built-in memory types outside the named buckets also contribute candidates. The final deduplicated ranking contains at most `limit` entries
 - **Default tier per category**: with `detail` omitted, each category lands on the tier below. Only `events` reads a file; every other category costs no read
 
   | Category | Default tier | Leftover budget may reach | Why |
@@ -665,7 +665,7 @@ Injecting context every turn used to mean searching per type, reading each hit b
   | `events` | overview | full | The one memory type whose body is long enough for `# Summary` extraction to be a real compression |
   | `entities` / `preferences` / `experiences` | abstract | abstract | Short bodies, and the writer stores the whole body in the abstract scalar, so abstract already is the complete file |
   | `resources` / `skills` | abstract | abstract | The 256-char abstract from semantic processing; bodies can be large or carry credentials, so deepening is opt-in |
-  | `memories` | abstract | abstract | Built-in memory types outside the four named ones — `cases`, `patterns`, `tools`, `trajectories`, skill-usage memories. Only quota-free retrieval reaches them; they own no bucket, so `quotas` cannot name them, but `detail` and `other_peer_penalty` can |
+  | `memories` | abstract | abstract | Built-in memory types outside the four named ones — `cases`, `patterns`, `tools`, `trajectories`, skill-usage memories. Quota-free and purpose-driven retrieval reach them; explicit `quotas` cannot name them, but `detail` and `other_peer_penalty` can |
   | Directory hits | overview | overview | A directory has no abstract, so it reads the `.overview.md` sidecar; a full tier is meaningless for a subtree |
 
 - **Floor**: every result carries at least its `uri`. When a memory abstract is unavailable or busts the per-entry cap, the entry falls back to overview: the memory writer stores the whole body in that scalar, so for memory categories overview sits *below* abstract on the content ladder and the substitute discloses less. A `resources` or `skills` abstract is the short generated summary instead, so the same substitution would read a body the caller never asked for — those two degrade to a bare `uri` rather than deepen
@@ -773,7 +773,7 @@ ledger and remain available to the later turn they are relevant to.
 - Any context-only parameter sent explicitly under `mode="list"` → 400
 - `target_uri` under `mode="context"` → 400
 - Unknown `quotas` key → 400
-- Fields ignored in context mode (`level`, and `limit` when `purpose` or explicit quotas are active) are reported in `stats.ignored`
+- Fields ignored in context mode (`level`, and `limit` when explicit quotas are active) are reported in `stats.ignored`
 
 ---
 

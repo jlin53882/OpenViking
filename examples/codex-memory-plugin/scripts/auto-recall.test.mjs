@@ -279,11 +279,8 @@ test("auto-recall asks the context face with the derived OpenViking session id",
     assert.equal(requests[0].body.mode, "context");
     assert.equal(requests[0].body.session_id, "cx-codex_123");
     assert.equal(requests[0].body.purpose, "coding");
-    assert.equal(requests[0].body.limit, undefined);
-    assert.equal(
-      Object.values(requests[0].body.quotas).reduce((sum, quota) => sum + quota, 0),
-      6,
-    );
+    assert.equal(requests[0].body.limit, 1);
+    assert.equal(requests[0].body.quotas, undefined);
     assert.equal(requests[0].body.max_tokens, 800);
     assert.equal(requests[0].body.dedup_turns, 5);
     assert.equal(requests[0].body.target_uri, undefined);

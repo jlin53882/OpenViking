@@ -561,6 +561,7 @@ export class OpenVikingClient {
               ? `${query.slice(0, 4000)}…(+${query.length - 4000} more chars)`
               : query,
           purpose: body.purpose,
+          limit: body.limit ?? null,
           quotas: body.quotas ?? null,
           score_threshold: body.score_threshold,
           context_type: body.context_type ?? null,

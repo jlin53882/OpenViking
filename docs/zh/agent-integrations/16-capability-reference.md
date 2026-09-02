@@ -59,13 +59,13 @@
 | opencode | 7 plugin hook + MCP 代理 | ✅ | ✅ | ❌ | ✅（10000）+ repo 列表进 system prompt | ❌（compacting 前后各 commit 一次） | ✅ | ❌（有 toast） |
 | dsh | Cordis 原生插件（同进程）+ MCP 代理 + skill | ✅ | ✅ | ❌ | ✅（10000，每 session 一次） | ❌ | ✅ | ❌ |
 | pi | 原生扩展（8 事件） | ✅ | ✅ | ❌ | ✅（10000，进 systemPrompt 每轮重拼） | ✅ **takeover**（默认开） | ✅ | ✅ |
-| openclaw | context-engine 插件（`ownsCompaction:true`） | ✅ | ❌（走 `/find`，该接口无 session_id 字段） | ❌ | ❌ | ✅ **ContextEngine 全接管** | ❌ 失败轮次不重放 | ❌ |
+| openclaw | context-engine 插件（`ownsCompaction:true`） | ✅ | ✅ | ❌ | ❌ | ✅ **ContextEngine 全接管** | ❌ 失败轮次不重放 | ❌ |
 | hermes | MemoryProvider 原生插件 | ✅ | 部分（仅 `search/search` 首选路径；降级 `/find` 不带） | ❌ | ❌（静态工具指引块） | ❌ | ✅ 进程内队列（不落盘） | ❌ |
 | ov CLI | 一次性命令 | ❌（`ov find/search` 是显式命令） | —（`ov search --session-id` 为显式参数） | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 \* 此列指客户端是否内建了针对召回结果的本地压缩；服务端则在 context 检索面上，统一为所有调用方提供 digest 能力（`rewrite` 参数，[§3.2.5](#_3-2-5-召回再摘要)）。
 
-**session_id 携带现状**：除 openclaw（其调用的 `/find` 接口无该字段）与 hermes 的降级路径外，其余所有 harness 的自动召回均显式携带 session_id，并有跨插件回归测试钉死（`examples/memory-plugin-shared/recall-session-wiring.test.mjs:16-39`）。
+**session_id 携带现状**：所有 harness 的 context-search 自动召回路径均携带 session_id；hermes 的降级 `/find` 路径仍会丢失。共享 harness 由跨插件回归测试钉死（`examples/memory-plugin-shared/recall-session-wiring.test.mjs:16-39`），openclaw 另有自身 context-search 测试。
 
 ## 1.3 形态分组
 
@@ -230,7 +230,7 @@ per-harness 章节（档案卡）只写差异；所有共享事实均在本章�
 
 JS 系 harness 的召回逻辑均由 `recall-core.mjs` 中的三级降级链处理：
 
-1. **context face**：调用 `POST /api/v1/search/search`，参数设定为 `mode:"context"` 且 `purpose:"coding"`。其核心设计原则为"只声明意图，机制交服务端"：对于 `quotas`/`max_tokens`/`query_expansion`/`rewrite_max_bullets` 等参数，仅在用户显式配置时（带有 configured 哨兵字段）才会发送，否则直接采用服务端的默认设定。
+1. **context face**：调用 `POST /api/v1/search/search`，参数设定为 `mode:"context"` 且 `purpose:"coding"`。其核心设计原则为“只声明意图，机制交服务端”：显式配置的召回条数作为全局 `limit` 发送，不再由客户端换算 `quotas`；未配置时两者均省略。`max_tokens` / `query_expansion` / `rewrite_max_bullets` 等其他可选参数也只在配置后发送，否则采用服务端默认设定。
 2. **legacy `/recall`**：若 context face 请求返回 400/422 错误，且响应报文包含 `extra`/`mode`/`unexpected` 等特征字段，则判定对接了旧版服务端。此时会在本地写入 6 小时的负缓存（路径为 `~/.openviking/state/context-face.json`，该文件全机共享，一旦被任一 harness 标记，同机所有 JS 系 harness 均会跳过 context face 阶段）。随后降级调用已弃用的 `/api/v1/search/recall` 接口；若 `peer_scope` 被拒，则去掉该参数重试一次。
 3. **raw find 兜底**：并发请求 `viking://~/memories` 与 `viking://~/skills`，调用两次 `POST /search/find`（注意：resources 被刻意排除在自动召回之外，资源类文档由模型主动调用 `search` 获取）。客户端收到结果后进行本地重排（权重规则为：leaf +0.12 / 时间意图 +0.10 / 偏好意图 +0.08 / 词面重叠 ≤0.2）、去重，最后按客户端 token 预算装填。`recallTokenBudget`、`recallMaxContentChars` 与 `recallPreferAbstract` 三个旋钮只在这一级生效；而在 context face 下，注入预算由服务端 `max_tokens`（默认 1600）决定。
 
@@ -253,7 +253,7 @@ JS 系 harness 的召回逻辑均由 `recall-core.mjs` 中的三级降级链处�
 | opencode | 每条 `chat.message` 中的 user 消息 | 拼接非 synthetic text part；若正文已含 `<openviking-context` 则跳过本轮召回 | ✅ `oc-` | A（timeoutMs=30000） | 合成 synthetic part 并 `unshift` 到 parts 最前 | ❌ |
 | dsh | `agent/pre-step` waterfall（先 await next 再 append） | claimed batch 全部消息（过滤自身注入的内容） | ✅ `dsh-` | A | 借由 `createUserMessage` append 到 `decision.messages` 尾部（source: plugin/openviking-memory） | ❌ |
 | pi | `before_agent_start` 阶段排队；在 `context` 事件内检索（当前轮 prompt 拿当前轮记忆） | prompt 原文 | ✅ `pi-`（会话未建立时不带） | A | 前置到最后一条真实 user 消息（通过 `<openviking-context` 幂等检测） | ❌ |
-| openclaw | context-engine transformContext assemble（设有 7 道 passthrough 门） | 最后一条 user 消息纯 text，清洗后截 4000 字符 | ❌（`/find` 无该字段） | `/find` | 以 `<relevant-memories>` + `Source: openviking-auto-recall` 格式前置进最后一条 user 消息 | ❌ |
+| openclaw | context-engine transformContext assemble（设有 7 道 passthrough 门） | 最后一条 user 消息纯 text，清洗后截 4000 字符 | ✅ OpenViking session | A（context/coding） | 以 `<relevant-memories>` + `Source: openviking-auto-recall` 格式前置进最后一条 user 消息 | ❌ |
 | hermes | 每轮 API 调用前同步执行 `prefetch` | 原始用户输入，双层剥 skill 脚手架；<5 字符跳过 | 部分携带（仅 `search/search` 首选路径，落 B；降级 `/find` 时不带） | B / find | `<memory-context>` fenced 块追加到当轮 user 消息（只进 API 请求体，不写回持久化） | ❌ |
 
 \* 同 [§1.2](#_1-2-自动-hook-面-通过-harness-自动实现)：此列的"再摘要"特指客户端本地压缩，而服务端 digest 对所有调用方均可用（[§3.2.5](#_3-2-5-召回再摘要)）。ov CLI 无自动召回，不在本表。
@@ -268,8 +268,8 @@ JS 系 harness 的召回逻辑均由 `recall-core.mjs` 中的三级降级链处�
 ### 3.2.4 超时与预算链
 
 - 家族 A 客户端推导：带 rewrite → `max(timeoutMs, 45000)`；带 expansion → `max(timeoutMs, 15000)`；对应服务端熔断 5s（expansion）/30s（rewrite）——设计上让客户端预算覆盖服务端各阶段，防止客户端提前 abort 丢掉整个响应。
-- 实际值：cc 15s（hook 预算 60s）；codex 召回整 hook 120s 硬截止 + 压缩子进程 110s；cursor/trae×2/zcode 15s（宿主 hook 预算 20s）；opencode 30s；dsh 15s（阻塞 pre-step）；pi 15s；openclaw 整个召回流程外层 5s 硬超时（500ms health precheck；默认 `recallPreferAbstract=false` 时每条 leaf 记忆多一次 read，预算内最多 1 find + 6 read + 1 health）；hermes 总预算 4s / 单请求 3s（可配）。
-- 注入体预算：服务端 `max_tokens` 默认 1600（家族 A 默认不发、由服务端决定）；openclaw / hermes 用字符预算 4000（两家都是"装不下整条跳过"而非截断）。
+- 实际值：cc 15s（hook 预算 60s）；codex 召回整 hook 120s 硬截止 + 压缩子进程 110s；cursor/trae×2/zcode 15s（宿主 hook 预算 20s）；opencode 30s；dsh 15s（阻塞 pre-step）；pi 15s；openclaw 默认 15s 外层超时（可配置，另有 500ms health precheck），只发一次服务端组装 context search，不再逐条 read；hermes 总预算 4s / 单请求 3s（可配）。
+- 注入体预算：服务端 `max_tokens` 默认 1600（家族 A 默认不发、由服务端决定）；openclaw 把 4000 字符配置换算成 `max_tokens=1000` 后直接使用服务端组装结果，hermes 仍在客户端按 4000 字符执行“装不下整条跳过”。
 
 ### 3.2.5 召回再摘要
 
@@ -403,7 +403,7 @@ JS 系 harness 的召回逻辑均由 `recall-core.mjs` 中的三级降级链处�
 | 触发 | 客户端 token 阈值 30000 + 保留 3 轮 | 宿主调用 assemble/compact |
 | 压缩产物 | 一条合成 user 消息（3000 token 截断） | 重建后的整个 messages 数组 + compaction summary |
 | 失败姿态 | fail-open 回完整历史 | passthrough 回宿主 live 消息 |
-| 召回与 session | context face 带 session_id | `/find` 不带（expansion/台账不参与） |
+| 召回与 session | context face 带 session_id | context/coding 请求携带 OpenViking session ID，参与 expansion 与台账 |
 
 ## 3.5 写入与删除的类型边界
 
@@ -552,7 +552,7 @@ MCP `write` / REST `content/write` 的三道 guard（`content_write.py`）：可
 - **集成文档**：[OpenClaw 插件](./03-openclaw.md)
 - **形态**：唯一 context-engine 全接管型（`ownsCompaction:true`）。15 原生工具（默认开 14）+ 5 slash + 4 hook + Gateway HTTP 路由 + feature-gate RPC。remote-only。版本 2026.6.18。
 - **能力亮点**：检索拆两个默认不重叠入口——`memory_recall` 默认搜 memory、`ov_search` 默认搜 resource+user skills（都可显式参数越界）；`add_skill` 默认开；`memory_forget` memory-only 白名单（[§3.5](#_3-5-写入与删除的类型边界)）；三个 tool-result 工具读服务端外置输出（跨会话 guard）；ContextEngine 全接管（[§3.4.3](#_3-4-3-openclaw-contextengine)）；setup 向导带 key 角色探测与版本兼容检查。
-- **行为要点**：召回走 `/find` 不带 session_id（expansion/去重台账不参与，长会话中同一记忆可能重复注入）；关闭不触发 commit，归档依赖显式 `/new`/`/reset` 与 ~50% 阈值（[§3.3.3](#_3-3-3-关闭方式-×-harness-终局矩阵)）；无本地 pending queue（失败轮次不重放）；`compact()` 最长阻塞 5 分钟；召回默认对每条 leaf 记忆多一次 read（`recallPreferAbstract=false`）；配置严格校验，存在未知键/非法值时插件进入 setup-only 模式。
+- **行为要点**：auto-recall 与 `memory_recall` 均走带 session 的 context/coding 接口，使用服务端 expansion、去重、全局 limit 与 token budget 组装。显式工具 `limit` 优先于 session、peer/claw 和显式静态 `recallLimit`；均未设置时客户端省略 `limit` 与 `quotas`，使用服务端默认值。`memory_recall` 不再接受 `targetUri`，也不做本地 read/重排；精确 URI 范围搜索由 `ov_search` 提供。关闭不触发 commit，归档依赖显式 `/new`/`/reset` 与 ~50% 阈值（[§3.3.3](#_3-3-3-关闭方式-×-harness-终局矩阵)）；无本地 pending queue（失败轮次不重放）；`compact()` 最长阻塞 5 分钟；配置严格校验，存在未知键/非法值时插件进入 setup-only 模式。
 - **配置**：`openclaw.json` 的 `plugins.entries.openviking.config` + 少量 env；认证头 `X-API-Key`（[§3.1.3](#_3-1-3-凭据体系)）；commit 阈值由 `commitTokenThresholdRatio` 控制（默认 0.5）；召回字符预算 4000。
 - **维度索引**：工具面 [§1.1](#_1-1-主动工具面-agentic-调用能力) ｜召回 [§3.2](#_3-2-自动召回与注入) ｜ContextEngine [§3.4.3](#_3-4-3-openclaw-contextengine) ｜删除 [§3.5](#_3-5-写入与删除的类型边界) ｜commit [§3.3.2](#_3-3-2-常规-commit-触发条件)/[§3.3.3](#_3-3-3-关闭方式-×-harness-终局矩阵)。
 

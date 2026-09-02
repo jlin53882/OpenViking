@@ -27,6 +27,7 @@ import { registerOpenVikingMemoryRecallTools } from "../../plugin/openviking-mem
 import { registerOpenVikingQueryTools } from "../../plugin/openviking-query-tools.js";
 import { registerOpenVikingRecallTraceTools } from "../../plugin/openviking-recall-trace-tools.js";
 import { registerOpenVikingToolResultTools } from "../../plugin/openviking-tool-result-tools.js";
+import { resolveRecallSearchPlan } from "../../registries/recall-resource-types.js";
 
 describe("plugin module seams", () => {
   it("registers only enabled OpenViking tools through the tool-registration seam", () => {
@@ -911,47 +912,51 @@ describe("plugin module seams", () => {
     const memory = {
       uri: "viking://user/default/memories/m1",
       category: "preferences",
-      abstract: "User prefers TDD.",
+      text: "User prefers TDD.",
       score: 0.93,
-      level: 2,
     };
-    const find = vi.fn().mockResolvedValue({ memories: [memory], total: 1 });
-    const read = vi.fn().mockResolvedValue("User prefers TDD.");
+    const searchContext = vi.fn().mockResolvedValue({
+      entries: [memory],
+      rendered: "User prefers TDD.",
+      stats: { candidates: 1, used_tokens: 8 },
+    });
     const getDefaultAgentId = vi.fn().mockReturnValue("default-agent");
     const recordAndFlush = vi.fn().mockResolvedValue(undefined);
     const getEffective = vi.fn().mockResolvedValue({
-      recallLimit: 1,
+      recallLimit: 2,
       scoreThreshold: 0.5,
-      targetUri: "viking://user/default",
       resourceTypes: ["user"],
       candidateLimit: 4,
       maxInjectedChars: 500,
+      recallPreferAbstract: true,
       rankingWeights: {},
       categoryWeights: {},
       resourceTypeWeights: {},
+      sources: { recallLimit: "request" },
     });
 
     registerOpenVikingMemoryRecallTools({
       registerTool,
-      getClient: async () => ({ find, read, getDefaultAgentId }),
+      getClient: async () => ({ searchContext, getDefaultAgentId }),
       queryConfigStore: { getEffective },
       toQueryConfigContext: (session) => ({ agentId: session.agentId, sessionId: session.sessionId, sessionKey: session.sessionKey, ovSessionId: session.ovSessionId }),
-      resolvePluginSessionRouting: () => ({
-        agentId: "agent-main",
-        actorPeerId: "agent-main",
-        sessionId: "session-1",
-        sessionKey: "agent:agent-main:session-1",
-        ovSessionId: "ov-session-1",
-      }),
+      resolvePluginSessionRouting: (ctx) => ctx?.sessionId === "missing-session"
+        ? {
+            agentId: "agent-main",
+            actorPeerId: "agent-main",
+            sessionId: "missing-session",
+            sessionKey: "agent:agent-main:missing-session",
+          }
+        : {
+            agentId: "agent-main",
+            actorPeerId: "agent-main",
+            sessionId: "session-1",
+            sessionKey: "agent:agent-main:session-1",
+            ovSessionId: "ov-session-1",
+          },
       isBypassedSession: () => false,
       makeBypassedToolResult: (toolName: string) => ({ content: [{ type: "text" as const, text: `bypassed ${toolName}` }], details: { toolName } }),
-      resolveRecallSearchPlan: vi.fn(),
-      postProcessMemories: (items) => items,
-      pickMemoriesForInjection: (items) => items.slice(0, 1),
-      buildMemoryLinesWithBudget: vi.fn(async (items, readFn) => {
-        await readFn(items[0].uri);
-        return { lines: ["1. [preferences] User prefers TDD. (93%)"], estimatedTokens: 8 };
-      }),
+      resolveRecallSearchPlan,
       inferRecallResourceType: (uri) => uri.startsWith("viking://user/") ? "user" : "resource",
       createTraceId: () => "memory_recall-trace-1",
       boundTraceQuery: (query) => ({ query }),
@@ -980,16 +985,19 @@ describe("plugin module seams", () => {
     }, {
       recallLimit: 2,
       scoreThreshold: 0.5,
-      targetUri: undefined,
       resourceTypes: undefined,
     });
-    expect(find).toHaveBeenCalledWith("TDD preference", {
-      targetUri: "viking://user/default",
-      limit: 4,
-      scoreThreshold: 0,
+    expect(searchContext).toHaveBeenCalledWith("TDD preference", {
+      sessionId: "ov-session-1",
+      limit: 2,
+      scoreThreshold: 0.5,
+      contextType: "memory",
+      queryExpansion: "auto",
+      maxTokens: 125,
+      detail: "abstract",
+      peerScope: "actor",
       actorPeerId: "agent-main",
     });
-    expect(read).toHaveBeenCalledWith("viking://user/default/memories/m1", "agent-main");
     expect(recordAndFlush).toHaveBeenCalledWith(expect.objectContaining({
       traceId: "memory_recall-trace-1",
       sessionId: "session-1",
@@ -998,15 +1006,33 @@ describe("plugin module seams", () => {
       agentId: "agent-main",
       source: "memory_recall",
       resourceTypes: ["user"],
-      stats: { candidateCount: 1, selectedCount: 1, injectedCount: 1 },
+      stats: { candidateCount: 1, selectedCount: 1, injectedCount: 1, estimatedTokens: 8 },
     }));
-    expect(result.content[0].text).toContain("Found 1 memories");
+    expect(result.content[0].text).toBe("User prefers TDD.");
     expect(result.details).toMatchObject({
       count: 1,
       total: 1,
       scoreThreshold: 0.5,
-      requestLimit: 4,
+      requestLimit: 2,
+      limitSource: "request",
       recallMaxInjectedChars: 500,
     });
+
+    searchContext.mockClear();
+    recordAndFlush.mockClear();
+    const unavailableRecallTool = recallFactory({ sessionId: "missing-session" });
+    const unavailable = await unavailableRecallTool.execute("call-2", {
+      query: "agent-only memory",
+      resourceTypes: ["agent"],
+    });
+
+    expect(searchContext).not.toHaveBeenCalled();
+    expect(unavailable.content[0].text).toBe("No relevant OpenViking memories found.");
+    expect(unavailable.details).toMatchObject({ count: 0, total: 0 });
+    expect(recordAndFlush).toHaveBeenCalledWith(expect.objectContaining({
+      resourceTypes: ["agent"],
+      searches: [expect.objectContaining({ resourceType: "agent", error: "missing_session" })],
+      stats: { candidateCount: 0, selectedCount: 0, injectedCount: 0, estimatedTokens: 0 },
+    }));
   });
 });

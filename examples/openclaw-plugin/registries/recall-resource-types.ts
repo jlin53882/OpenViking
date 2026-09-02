@@ -54,7 +54,7 @@ export function normalizeRecallResourceTypes(value: unknown): RecallResourceType
 
 export function resolveRecallSearchPlan(
   resourceTypes: unknown,
-  _ctx: { ovSessionId?: string; agentId?: string },
+  ctx: { ovSessionId?: string; agentId?: string },
 ): RecallSearchPlan {
   const normalized = normalizeRecallResourceTypes(resourceTypes);
   const searches: RecallSearchPlan["searches"] = [];
@@ -64,9 +64,18 @@ export function resolveRecallSearchPlan(
   for (const resourceType of normalized) {
     if (resourceType === "resource") {
       searches.push({ resourceType, contextType: "resource" });
-    } else if ((resourceType === "user" || resourceType === "agent") && !addedMemorySearch) {
+    } else if (resourceType === "user" && !addedMemorySearch) {
       searches.push({ resourceType: "user", contextType: "memory" });
       addedMemorySearch = true;
+    } else if (resourceType === "agent") {
+      if (!ctx.ovSessionId) {
+        skipped.push({ resourceType, reason: "missing_session" });
+      } else if (!addedMemorySearch) {
+        // The context face owns actor/session scoping; user and agent memory
+        // share one request and are distinguished by that session context.
+        searches.push({ resourceType: "user", contextType: "memory" });
+        addedMemorySearch = true;
+      }
     }
   }
 

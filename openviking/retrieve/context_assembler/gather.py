@@ -206,6 +206,7 @@ async def gather_candidates(
     quotas: Optional[Mapping[str, int]],
     limit: int,
     score_threshold: Optional[float],
+    global_limit: Optional[int] = None,
     filter: Optional[Dict[str, Any]] = None,
     image_url: Optional[str] = None,
     peer_scope: str = "all",
@@ -379,11 +380,88 @@ async def gather_candidates(
         candidates.sort(key=_rank_key, reverse=True)
         return candidates[: max(0, limit)]
 
+    async def gather_other_memories() -> List[Candidate]:
+        """Keep built-in memory types outside the named quota buckets reachable."""
+        width = max(global_limit or limit, 1)
+        memory_filter = merge_context_type_filter(filter, ContextType.MEMORY)
+        searches = [
+            _find(
+                query=query,
+                find_ctx=ctx,
+                target_uri=target,
+                find_limit=_overfetch(width * OTHER_PEER_OVERFETCH),
+                find_filter=memory_filter,
+            )
+            for query in planned
+            for target in memory_target_roots(ctx)
+        ]
+        peer_offset = len(searches)
+        if peer_scope == "all":
+            searches.extend(
+                _find(
+                    query=query,
+                    find_ctx=open_ctx,
+                    target_uri=f"{user_root}/peers",
+                    find_limit=_overfetch(width * OTHER_PEER_OVERFETCH),
+                    find_filter=memory_filter,
+                )
+                for query in planned
+            )
+
+        results = await asyncio.gather(*searches)
+        found = [item for result in results[:peer_offset] for item in _extract(result, "memories")]
+        for result in results[peer_offset:]:
+            found.extend(
+                item
+                for item in _extract(result, "memories")
+                if origin_for_uri(_uri(item), ctx.actor_peer_id, user_root) == "other_peer"
+            )
+        candidates = [
+            candidate
+            for candidate in _build([(item, None) for item in dedupe_keep_best(found)])
+            if candidate.category == OTHER_MEMORY_CATEGORY
+        ]
+        candidates.sort(key=_rank_key, reverse=True)
+        searched[OTHER_MEMORY_CATEGORY] = len(candidates)
+        return candidates[:width]
+
     if quotas is None:
         candidates = await gather_flat()
+    elif global_limit is not None:
+        active = [(bucket, quota) for bucket, quota in quotas.items() if quota > 0]
+        # Purpose presets shape the primary cross-domain pool, but they must
+        # not cap the final result count when context_type makes some buckets
+        # unavailable. Fetch enough per bucket to backfill any unused slots.
+        bucket_results = await asyncio.gather(
+            *(gather_bucket(bucket, max(quota, global_limit)) for bucket, quota in active),
+            gather_other_memories(),
+        )
+        primary: List[Candidate] = []
+        overflow: List[Candidate] = []
+        for (_, quota), bucket in zip(active, bucket_results[:-1]):
+            primary.extend(bucket[:quota])
+            overflow.extend(bucket[quota:])
+
+        other_memories = bucket_results[-1]
+        primary.extend(other_memories[:1])
+        overflow.extend(other_memories[1:])
+
+        candidates = _dedupe_candidates(primary)
+        candidates.sort(key=_rank_key, reverse=True)
+        candidates = candidates[:global_limit]
+        if len(candidates) < global_limit:
+            selected = {candidate.base_uri for candidate in candidates}
+            backfill = [
+                candidate
+                for candidate in _dedupe_candidates(overflow)
+                if candidate.base_uri not in selected
+            ]
+            backfill.sort(key=_rank_key, reverse=True)
+            candidates.extend(backfill[: global_limit - len(candidates)])
+        candidates.sort(key=_rank_key, reverse=True)
     else:
         active = [(bucket, quota) for bucket, quota in quotas.items() if quota > 0]
-        buckets = await asyncio.gather(*(gather_bucket(b, q) for b, q in active))
+        buckets = await asyncio.gather(*(gather_bucket(bucket, quota) for bucket, quota in active))
         candidates = [candidate for bucket in buckets for candidate in bucket]
         candidates = _dedupe_candidates(candidates)
         candidates.sort(key=_rank_key, reverse=True)

@@ -3,6 +3,7 @@ export type ContextSearchBody = {
   mode: "context";
   purpose: "coding";
   score_threshold: number;
+  limit?: number;
   quotas?: Record<string, number>;
   max_tokens?: number;
   peer_scope?: "actor";

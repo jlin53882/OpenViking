@@ -1,5 +1,5 @@
 import type { FindResultItem, OpenVikingClient, SearchContextEntry } from "./client.js";
-import type { MemoryOpenVikingConfig } from "./config.js";
+import type { MemoryOpenVikingConfig, ParsedMemoryOpenVikingConfig } from "./config.js";
 import type { EffectiveQueryConfig } from "./query-config.js";
 import { toJsonLog } from "./memory-ranking.js";
 import { quickRecallPrecheck, withTimeout } from "./process-manager.js";
@@ -316,7 +316,8 @@ export function shouldRecallAgentExperience(input: {
 }
 
 export async function buildAutoRecallContext(params: {
-  cfg: Required<MemoryOpenVikingConfig>;
+  cfg: Required<MemoryOpenVikingConfig> &
+    Partial<Pick<ParsedMemoryOpenVikingConfig, "recallLimitConfigured">>;
   queryConfig?: EffectiveQueryConfig;
   client: OpenVikingClient;
   agentId: string;
@@ -349,12 +350,48 @@ export async function buildAutoRecallContext(params: {
     (async () => {
       const scoreThreshold = queryConfig?.scoreThreshold ?? cfg.recallScoreThreshold;
       const recallLimit = queryConfig?.recallLimit ?? cfg.recallLimit;
+      const recallLimitConfigured = queryConfig
+        ? queryConfig.sources.recallLimit !== "default"
+        : cfg.recallLimitConfigured !== false;
       const maxInjectedChars = queryConfig?.maxInjectedChars ?? cfg.recallMaxInjectedChars;
       const recallPreferAbstract = queryConfig?.recallPreferAbstract ?? cfg.recallPreferAbstract;
       const searchPlan = resolveRecallSearchPlan(params.resourceTypes ?? queryConfig?.resourceTypes ?? cfg.recallTargetTypes, {
         ovSessionId: params.ovSessionId,
         agentId,
       });
+      if (searchPlan.searches.length === 0) {
+        params.traceRecorder?.record({
+          schemaVersion: "1.0",
+          traceId: newTraceId(),
+          ts: Date.now(),
+          sessionId: params.sessionId,
+          sessionKey: params.sessionKey,
+          ovSessionId: params.ovSessionId,
+          agentId,
+          source: "auto_recall",
+          operationType: "semantic_find",
+          resourceTypes: searchPlan.resourceTypes,
+          trigger: {
+            rawUserTextPreview: params.rawUserTextPreview,
+            ...boundTraceQuery(queryText, cfg.traceRecallQueryMaxChars),
+            derivedKeywords: [],
+            queryTruncated: params.queryTruncated || queryText.length > cfg.traceRecallQueryMaxChars,
+          },
+          searches: searchPlan.skipped.map((skipped) => ({
+            resourceType: skipped.resourceType,
+            limit: recallLimit,
+            scoreThreshold,
+            durationMs: 0,
+            total: 0,
+            results: [],
+            error: skipped.reason,
+          })),
+          selected: [],
+          stats: { candidateCount: 0, selectedCount: 0, injectedCount: 0, estimatedTokens: 0 },
+        });
+        verbose?.("openviking: skipping auto-recall because no requested recall target is available");
+        return { memoryCount: 0, estimatedTokens: 0 };
+      }
       const contextTypes = [...new Set(searchPlan.searches.map((search) => search.contextType))];
       const maxTokens = Math.min(
         32_000,
@@ -367,7 +404,7 @@ export async function buildAutoRecallContext(params: {
       try {
         contextResult = await client.searchContext(queryText, {
           sessionId: params.ovSessionId,
-          limit: recallLimit,
+          ...(recallLimitConfigured ? { limit: recallLimit } : {}),
           scoreThreshold,
           contextType: contextTypes.length === 1 ? contextTypes[0] : contextTypes,
           queryExpansion: "auto",

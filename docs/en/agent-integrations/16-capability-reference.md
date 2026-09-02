@@ -59,13 +59,13 @@
 | opencode | 7 plugin hooks + MCP proxy | ✅ | ✅ | ❌ | ✅ (10000) + repo list into the system prompt | ❌ (commits once before and once after compacting) | ✅ | ❌ (toast instead) |
 | dsh | native Cordis plugin (same process) + MCP proxy + skill | ✅ | ✅ | ❌ | ✅ (10000, once per session) | ❌ | ✅ | ❌ |
 | pi | native extension (8 events) | ✅ | ✅ | ❌ | ✅ (10000, rebuilt into systemPrompt every turn) | ✅ **takeover** (on by default) | ✅ | ✅ |
-| openclaw | context-engine plugin (`ownsCompaction:true`) | ✅ | ❌ (goes through `/find`, which has no session_id field) | ❌ | ❌ | ✅ **full ContextEngine takeover** | ❌ failed turns are not replayed | ❌ |
+| openclaw | context-engine plugin (`ownsCompaction:true`) | ✅ | ✅ | ❌ | ❌ | ✅ **full ContextEngine takeover** | ❌ failed turns are not replayed | ❌ |
 | hermes | native MemoryProvider plugin | ✅ | partial (preferred `search/search` path only; the degraded `/find` path drops it) | ❌ | ❌ (static tool-guidance block) | ❌ | ✅ in-process queue (never written to disk) | ❌ |
 | ov CLI | one-shot commands | ❌ (`ov find/search` are explicit commands) | — (`ov search --session-id` is an explicit argument) | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 \* This column indicates whether the client performs its own local compression of recall results. On the server side, the context retrieval API provides digest capabilities equally to all callers via the `rewrite` parameter (see [§3.2.5](#_3-2-5-recall-digest)).
 
-**Current status of `session_id`**: With the exception of openclaw (whose `/find` endpoint lacks this field) and the degraded path in hermes, auto-recall on all harnesses explicitly carries a `session_id`. This behavior is enforced by a cross-plugin regression test (`examples/memory-plugin-shared/recall-session-wiring.test.mjs:16-39`).
+**Current status of `session_id`**: Auto-recall on every harness carries a `session_id` on its context-search path. Hermes still drops it on the degraded `/find` path. The shared-harness behavior is enforced by a cross-plugin regression test (`examples/memory-plugin-shared/recall-session-wiring.test.mjs:16-39`), while openclaw has its own context-search tests.
 
 ## 1.3 Grouping by form
 
@@ -227,7 +227,7 @@ Family A resolves credentials in the following order (refer to individual profil
 
 Recall for the JS-family harnesses is managed through a three-level degradation chain within `recall-core.mjs`:
 
-1. **Context face**: Calls `POST /api/v1/search/search` with `mode:"context"` and `purpose:"coding"`. Its core design principle is "declare intent only, leave the mechanism to the server." Parameters like `quotas`, `max_tokens`, `query_expansion`, and `rewrite_max_bullets` are transmitted only if explicitly configured by the user (indicated by a sentinel field); otherwise, server defaults are applied.
+1. **Context face**: Calls `POST /api/v1/search/search` with `mode:"context"` and `purpose:"coding"`. Its core design principle is "declare intent only, leave the mechanism to the server." An explicitly configured recall count is sent as the global `limit` rather than client-computed `quotas`; if it is not configured, both fields are omitted. Other optional parameters such as `max_tokens`, `query_expansion`, and `rewrite_max_bullets` are also transmitted only when configured, so server defaults apply otherwise.
 2. **Legacy `/recall`**: If the context face request returns a 400 or 422 error and the response body contains marker fields like `extra`, `mode`, or `unexpected`, the server is identified as an older version. A 6-hour negative cache is then written locally to `~/.openviking/state/context-face.json`. Because this is a machine-wide shared file, once one harness flags it, every JS-family harness on that machine will bypass the context face stage. The call then degrades to the deprecated `/api/v1/search/recall` endpoint. If `peer_scope` is rejected, it retries once without that parameter.
 3. **Raw find fallback**: Concurrently requests `viking://~/memories` and `viking://~/skills` by calling `POST /search/find` twice. (Note: resources are deliberately excluded from automatic recall; resource documents are fetched by the model invoking `search` itself). The client then re-ranks the results locally (using weight rules: leaf +0.12, time intent +0.10, preference intent +0.08, and lexical overlap ≤0.2), deduplicates them, and fills up to the client token budget. The `recallTokenBudget`, `recallMaxContentChars`, and `recallPreferAbstract` configurations take effect *only* at this level. Under the context face, the injection budget is dictated by the server's `max_tokens` (which defaults to 1600).
 
@@ -253,7 +253,7 @@ On the server side, `session_id` handling diverges into two distinct execution p
 | opencode | the user message in every `chat.message` | concatenates non-synthetic text parts; skips recall for the turn if the body already contains `<openviking-context` | ✅ `oc-` | A (timeoutMs=30000) | builds a synthetic part and `unshift`s it to the front of parts | ❌ |
 | dsh | `agent/pre-step` waterfall (await next first, then append) | every message in the claimed batch (filtering out its own injected content) | ✅ `dsh-` | A | appended to the end of `decision.messages` via `createUserMessage` (source: plugin/openviking-memory) | ❌ |
 | pi | queued during `before_agent_start`; retrieval runs inside the `context` event (this turn's prompt gets this turn's memories) | prompt verbatim | ✅ `pi-` (omitted before the session exists) | A | prepended to the last real user message (idempotency checked via `<openviking-context`) | ❌ |
-| openclaw | context-engine transformContext assemble (7 passthrough gates) | plain text of the last user message, cleaned and cut to 4000 characters | ❌ (`/find` has no such field) | `/find` | prepended into the last user message as `<relevant-memories>` + `Source: openviking-auto-recall` | ❌ |
+| openclaw | context-engine transformContext assemble (7 passthrough gates) | plain text of the last user message, cleaned and cut to 4000 characters | ✅ OpenViking session | A (context/coding) | prepended into the last user message as `<relevant-memories>` + `Source: openviking-auto-recall` | ❌ |
 | hermes | `prefetch` runs synchronously before every API call | raw user input, with two layers of skill scaffolding stripped; skipped under 5 characters | partial (only on the preferred `search/search` path, which lands in B; omitted when degrading to `/find`) | B / find | `<memory-context>` fenced block appended to the current user message (request body only, never written back to storage) | ❌ |
 
 \* As in [§1.2](#_1-2-automatic-hook-surface-driven-by-the-harness), "digest" in this column refers to client-side local compression, while the server digest is available to every caller ([§3.2.5](#_3-2-5-recall-digest)). The `ov` CLI has no automatic recall and is not included in this table.
@@ -284,9 +284,9 @@ On the server side, `session_id` handling diverges into two distinct execution p
   - **codex**: Recall enforces a hard 120s deadline for the entire hook, plus a 110s compression subprocess.
   - **cursor / trae×2 / zcode**: 15s (against a 20s host hook budget).
   - **opencode / dsh / pi**: 15s (`dsh` blocks the pre-step).
-  - **openclaw**: Imposes a 5s hard timeout around the entire recall flow (including a 500ms health precheck). Since the default `recallPreferAbstract=false` means every leaf memory costs one extra read, this budget allows at most 1 find + 6 reads + 1 health check.
+  - **openclaw**: Uses a configurable 15s default outer timeout around one server-assembled context search, preceded by a 500ms health precheck. There are no per-entry client reads.
   - **hermes**: 4s total / 3s per request (configurable).
-- **Injection budget**: The server's `max_tokens` defaults to 1600 (Family A harnesses do not send this by default, allowing the server to dictate the limit). Both `openclaw` and `hermes` utilize a 4000-character budget, opting to "skip an entry that does not fit" rather than truncating it.
+- **Injection budget**: The server's `max_tokens` defaults to 1600 (Family A harnesses do not send this by default, allowing the server to dictate the budget). Openclaw converts its 4000-character setting to `max_tokens=1000` and accepts the server-assembled output directly; hermes retains a client-side 4000-character budget that skips an entry that does not fit.
 
 ### 3.2.5 Recall digest
 
@@ -423,7 +423,7 @@ Legend: **C** = commits; **C\*** = commits, with a precondition (see notes); **�
 | Trigger | Client-side token threshold (30000) + keep 3 turns | Host invocations of `assemble` or `compact` |
 | Compaction output | A single synthetic user message (truncated at 3000 tokens) | The fully rebuilt messages array plus a compaction summary |
 | Failure stance | Fail-open, reverting to the full history | Passthrough, reverting to the host's live messages |
-| Recall and session | The context interface carries `session_id` | `/find` does not (expansion and ledger are excluded) |
+| Recall and session | The context interface carries `session_id` | The context/coding request carries the OpenViking session ID and participates in expansion and the ledger |
 
 ## 3.5 Type boundaries for writes and deletes
 
@@ -570,7 +570,7 @@ Each card serves as a quick-reference entry point. It records only the facts and
 - **Integration docs**: [OpenClaw Plugin](./03-openclaw.md)
 - **Form**: Represents the only full ContextEngine takeover (`ownsCompaction:true`). Features 15 native tools (14 enabled by default) + 5 slash commands + 4 hooks + Gateway HTTP routes + feature-gate RPC. It operates entirely remotely. Version 2026.6.18.
 - **Highlights**: Retrieval is split into two non-overlapping entry points by default: `memory_recall` searches memory, while `ov_search` targets resources and user skills (though either can cross over if explicit parameters are provided). The `add_skill` tool is enabled by default, and `memory_forget` is whitelisted exclusively for memory ([§3.5](#_3-5-type-boundaries-for-writes-and-deletes)). Three tool-result tools read server-side externalized outputs (safeguarded across sessions). It features complete ContextEngine takeover ([§3.4.3](#_3-4-3-openclaw-contextengine)), and the setup wizard actively probes the key's role while verifying version compatibility.
-- **Behavior**: Recall invokes `/find` without a session ID. Consequently, there is no expansion or deduplication ledger, meaning the same memory might be repeatedly injected during a long session. Shutdowns do not trigger a commit; archiving relies on an explicit `/new` or `/reset` command alongside an approximate 50% threshold ([§3.3.3](#_3-3-3-shutdown-method-×-harness-outcome-matrix)). There is no local pending queue, so failed turns are not replayed. The `compact()` function can block for up to 5 minutes. By default, recall issues one additional read per leaf memory (`recallPreferAbstract=false`). Configuration validation is exceptionally strict: any unknown key or invalid value immediately forces the plugin into a setup-only mode.
+- **Behavior**: Auto-recall and `memory_recall` both use the session-aware context/coding endpoint, including its expansion, deduplication, global limit, and token-budget assembly. An explicit tool `limit` wins over session, peer/claw, and explicit static `recallLimit`; with no explicit value, the client omits `limit` and `quotas` so the server default applies. `memory_recall` no longer accepts `targetUri` or performs local reads/reranking; exact URI-scoped search remains available through `ov_search`. Shutdowns do not trigger a commit; archiving relies on an explicit `/new` or `/reset` command alongside an approximate 50% threshold ([§3.3.3](#_3-3-3-shutdown-method-×-harness-outcome-matrix)). There is no local pending queue, so failed turns are not replayed. The `compact()` function can block for up to 5 minutes. Configuration validation is exceptionally strict: any unknown key or invalid value immediately forces the plugin into a setup-only mode.
 - **Config**: Configured via `plugins.entries.openviking.config` in `openclaw.json` alongside a few environment variables. Utilizes the `X-API-Key` auth header ([§3.1.3](#_3-1-3-credential-systems)). The commit threshold is controlled by `commitTokenThresholdRatio` (default 0.5), and the recall character budget is 4000.
 - **Dimension index**: tool surface [§1.1](#_1-1-active-tool-surface-agentic-calls) | recall [§3.2](#_3-2-automatic-recall-and-injection) | ContextEngine [§3.4.3](#_3-4-3-openclaw-contextengine) | deletion [§3.5](#_3-5-type-boundaries-for-writes-and-deletes) | commit [§3.3.2](#_3-3-2-regular-commit-triggers)/[§3.3.3](#_3-3-3-shutdown-method-×-harness-outcome-matrix).
 

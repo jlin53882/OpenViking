@@ -76,8 +76,9 @@ FULL_BODY_ABSTRACT_CATEGORIES: frozenset[str] = frozenset(
 # reading resource bodies.
 DEPTH_CEILING_BY_CATEGORY: Dict[str, Tier] = {"events": "full"}
 
-# Purpose presets are absolute bucket ceilings. Their total is the candidate
-# width for bucketed retrieval; ``limit`` belongs only to quota-free flat mode.
+# Purpose presets are relative bucket weights. The server scales retrieval
+# breadth from the request's global ``limit`` and applies that limit after
+# cross-bucket ranking. Explicit ``quotas`` remain absolute bucket ceilings.
 PURPOSE_PRESETS: Dict[str, Dict[str, int]] = {
     "coding": {
         "events": 1,
@@ -146,13 +147,72 @@ class AssembleParams:
 def normalize_quotas(
     quotas: Optional[Mapping[str, Any]],
     purpose: Optional[str] = None,
+    limit: Optional[int] = None,
 ) -> Optional[Dict[str, int]]:
     """Resolve the active quota map, or ``None`` when bucketed sampling is off."""
     if quotas is None:
         if not purpose:
             return None
         preset = PURPOSE_PRESETS.get(purpose)
-        return dict(preset) if preset else None
+        if not preset:
+            return None
+        if limit is None:
+            return dict(preset)
+
+        # A purpose preset supplies relative retrieval weights. ``limit`` is
+        # the global result ceiling, not a client-side quota map. Keep at least
+        # one candidate from every active bucket when the ceiling is small, then
+        # let the globally ranked top-N decide which categories survive.
+        ceiling = max(1, int(limit))
+        active = [key for key, weight in preset.items() if weight > 0]
+        resolved = {key: (1 if key in active else 0) for key in preset}
+        if ceiling <= len(active):
+            return resolved
+
+        # Use a deterministic largest-remainder apportionment instead of
+        # handing out one slot per loop. Runtime must depend on the fixed
+        # category count, not on a caller-controlled ``limit``.
+        total_weight = sum(preset[key] for key in active)
+        scaled = {key: ceiling * preset[key] for key in active}
+        for key in active:
+            resolved[key] = max(1, scaled[key] // total_weight)
+
+        allocated = sum(resolved.values())
+        order_index = {key: index for index, key in enumerate(active)}
+        if allocated < ceiling:
+            # Flooring leaves fewer than ``len(active)`` slots. Clamped
+            # minimums have negative remainders and therefore lose ties to
+            # buckets that are still below their ideal share.
+            by_remainder = sorted(
+                active,
+                key=lambda key: (
+                    scaled[key] - resolved[key] * total_weight,
+                    -order_index[key],
+                ),
+                reverse=True,
+            )
+            for key in by_remainder[: ceiling - allocated]:
+                resolved[key] += 1
+        elif allocated > ceiling:
+            # A highly skewed future preset can over-allocate after enforcing
+            # the one-per-active-bucket minimum. Remove the surplus from the
+            # most over-represented buckets without ever dropping below one.
+            excess = allocated - ceiling
+            by_surplus = sorted(
+                active,
+                key=lambda key: (
+                    resolved[key] * total_weight - scaled[key],
+                    order_index[key],
+                ),
+                reverse=True,
+            )
+            for key in by_surplus:
+                take = min(excess, resolved[key] - 1)
+                resolved[key] -= take
+                excess -= take
+                if excess == 0:
+                    break
+        return resolved
 
     resolved: Dict[str, int] = {}
     for key, value in quotas.items():

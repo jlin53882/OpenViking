@@ -160,10 +160,9 @@ Recall semantic memories and resources. Current semantic recall target types are
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `query` | string | 是 | 召回查询文本 |
-| `limit` | number | 否 | 最终返回条数，默认使用插件配置 |
-| `scoreThreshold` | number | 否 | 最低分数，范围 0-1 |
-| `targetUri` | string | 否 | 指定单一搜索范围，例如 `viking://user/memories` |
-| `resourceTypes` | string[] | 否 | 未指定 `targetUri` 时使用，当前支持 `resource`、`user`、`agent`；session 历史走 `ov_archive_search` / `ov_archive_expand` |
+| `limit` | number | 否 | 全局返回条数上限；工具参数优先，其次是显式配置的 `recallLimit`，均未设置时使用服务端默认值 |
+| `scoreThreshold` | number | 否 | 发送给服务端 context search 的最低分数，范围 0-1 |
+| `resourceTypes` | string[] | 否 | context search 类型，支持 `resource`、`user`、`agent`；精确 URI 范围用 `ov_search`，session 历史用 `ov_archive_search` / `ov_archive_expand` |
 
 ### `memory_store`
 

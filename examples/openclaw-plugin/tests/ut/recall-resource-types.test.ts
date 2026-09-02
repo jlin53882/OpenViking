@@ -37,7 +37,13 @@ describe("recall resource type registry", () => {
     expect(resolveRecallSearchPlan(["agent", "user"], {})).toEqual({
       resourceTypes: ["agent", "user"],
       searches: [{ resourceType: "user", contextType: "memory" }],
-      skipped: [],
+      skipped: [{ resourceType: "agent", reason: "missing_session" }],
+    });
+
+    expect(resolveRecallSearchPlan(["agent"], {})).toEqual({
+      resourceTypes: ["agent"],
+      searches: [],
+      skipped: [{ resourceType: "agent", reason: "missing_session" }],
     });
   });
 });

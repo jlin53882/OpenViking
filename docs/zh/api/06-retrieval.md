@@ -615,7 +615,7 @@ Agent 插件每轮注入上下文时，过去需要按类型逐个检索、再�
 
 **处理流程**：
 1. **L1 查询理解**：可选，结合 Session 最近消息做有界意图扩展（最多 3 条查询，超时熔断，失败回退原查询）
-2. **L0 检索**：按 `quotas` 分桶独立检索，或不设配额时全域检索一次
+2. **L0 检索**：按显式 `quotas` 分桶、按 purpose 权重检索并全局补位，或两者都未设置时全域检索一次
 3. **L2 组装**：token 预算内填充档位（全员先落到各自类别的默认档，再用剩余预算按分数序加深），超限退档不截断
 4. **L3 重写**：可选，把组装结果压成带 URI 引用的 digest（超时熔断，失败仍返回未重写的 `rendered`；精确返回 `NO_RELEVANT_MEMORY` 时记为 `stats.rewrite="no_relevant"`，Coding Agent 客户端不会再回退注入 `rendered`）
 
@@ -627,7 +627,7 @@ Agent 插件每轮注入上下文时，过去需要按类型逐个检索、再�
 
 #### 2. 接口和参数说明
 
-**L0 检索域**：`query`、`image_url`、`context_type`、`limit`、`score_threshold`、`filter`、`tags`、`since`/`until` 与 list 模式一致。`limit` 只约束 quota-free 检索；一旦 `purpose` 或显式 `quotas` 启用分桶检索，各分类配额就是唯一候选上限。`target_uri` 在 context 模式下暂不支持（返回 400）；`level` 被忽略，档位由 `detail` 决定。
+**L0 检索域**：`query`、`image_url`、`context_type`、`limit`、`score_threshold`、`filter`、`tags`、`since`/`until` 与 list 模式一致。`limit` 是 quota-free 与 purpose 检索的全局结果上限（默认 `10`）。使用 `purpose` 时，服务端先按预设比例构造跨域主候选池，再从与过滤条件兼容的桶补满空缺，最后应用全局上限。显式 `quotas` 保留每桶绝对上限契约，此时 `limit` 不生效。`target_uri` 在 context 模式下暂不支持（返回 400）；`level` 被忽略，档位由 `detail` 决定。
 
 **L1 查询理解**
 
@@ -640,10 +640,10 @@ Agent 插件每轮注入上下文时，过去需要按类型逐个检索、再�
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `limit` | int | 10 | 仅作为 quota-free 检索的候选条目上限；`purpose` 或 `quotas` 启用分桶后被忽略 |
+| `limit` | int | 10 | quota-free 与 purpose 检索的全局结果上限（1–1000）；仅在显式传入 `quotas` 时被忽略 |
 | `max_tokens` | int | 1600 | 唯一的预算参数，采用感知 CJK 的启发式估算（codepoint ≥ 0x3000 记 1.5 token/字，其余按 chars/4） |
-| `quotas` | object | None | 各桶绝对条数上限；键取 `events`/`entities`/`preferences`/`experiences`/`resources`/`skills`。显式传入后忽略 `limit` |
-| `purpose` | `chat` \| `coding` | None | 按下表的绝对分类配额启用六域分桶采样；仅在未显式传 `quotas` 时生效 |
+| `quotas` | object | None | 各桶绝对条数上限；键取 `events`/`entities`/`preferences`/`experiences`/`resources`/`skills`，正值总和最多为 1000。显式传入后忽略 `limit` |
+| `purpose` | `chat` \| `coding` | None | 使用下表预设权重和全局 `limit` 启用服务端跨域采样；仅在未显式传 `quotas` 时生效 |
 | `detail` | `abstract` \| `overview` \| `full` \| object | None | 为每条结果请求同一个起始档和最高档；请求档不可用或装不进预算时仍逐档退档而不截断。省略时按类别取默认档（见下）。也可传按类别的对象，如 `{"events":"overview","preferences":"abstract"}`，未列出的类别仍取默认档。`"auto"` 是已废弃的写法，等价于省略 |
 | `dedup_turns` | int | 0 | 跨轮冷却轮数，需要 `session_id`；账本存在 `{session_uri}/.recall_log.json` |
 | `exclude_uris` | string[] | [] | 无状态去重兜底，最多 200 条，与 `dedup_turns` 取并集 |
@@ -659,7 +659,7 @@ Agent 插件每轮注入上下文时，过去需要按类型逐个检索、再�
 
 **档位规则**
 
-- **Purpose 预设**：`chat` 使用 `events:3, entities:3, preferences:1, experiences:1, resources:1, skills:1`；`coding` 使用 `events:1, entities:2, preferences:1, experiences:1, resources:3, skills:2`。这些值是每个分类的绝对上限，不是权重。各桶结果汇总后仍会去重并全局排序，但不会再被第二个全局 `limit` 截断
+- **Purpose 预设**：`chat` 使用 `events:3, entities:3, preferences:1, experiences:1, resources:1, skills:1`；`coding` 使用 `events:1, entities:2, preferences:1, experiences:1, resources:3, skills:2`。服务端把这些值作为主候选池的相对权重，按 `limit` 缩放；过滤或稀疏桶无法贡献时，再从兼容桶补位。具名桶之外的内置记忆类型也会参与候选。最终去重排序后的结果不超过 `limit`
 - **按类别的默认档**：省略 `detail` 时，各类别落在下表的档位；只有 `events` 会因此读文件，其余类别零 I/O
 
   | 类别 | 默认档 | 剩余预算可加深到 | 原因 |
@@ -667,7 +667,7 @@ Agent 插件每轮注入上下文时，过去需要按类型逐个检索、再�
   | `events` | 概览档 | 全文档 | 唯一正文足够长、`# Summary` 抽取能真正压缩的类型 |
   | `entities` / `preferences` / `experiences` | 摘要档 | 摘要档 | 正文本身很短，且写入侧把整篇正文存进了摘要标量，摘要档即完整内容 |
   | `resources` / `skills` | 摘要档 | 摘要档 | 语义处理生成的 256 字符摘要；正文可能很大或含凭据，加深需显式指定 |
-  | `memories` | 摘要档 | 摘要档 | 四个具名类型之外的内置记忆类型——`cases`、`patterns`、`tools`、`trajectories`、技能使用记忆。只有 quota-free 检索会命中它们；它们没有自己的检索桶，`quotas` 不能指定，但 `detail` 和 `other_peer_penalty` 可以 |
+  | `memories` | 摘要档 | 摘要档 | 四个具名类型之外的内置记忆类型——`cases`、`patterns`、`tools`、`trajectories`、技能使用记忆。quota-free 与 purpose 检索都会命中它们；显式 `quotas` 不能指定，但 `detail` 和 `other_peer_penalty` 可以 |
   | 目录命中 | 概览档 | 概览档 | 目录没有摘要，读 `.overview.md` 侧车；全文档对目录无意义 |
 
 - **保底**：每条结果至少给出 `uri`。记忆类摘要缺失或超出单条上限时回落到概览档：写入侧把整篇正文存进了摘要标量，所以对记忆类别而言概览档在内容阶梯上位于摘要档*之下*，这次替换披露得更少。而 `resources` / `skills` 的摘要是语义处理生成的短摘要，同样的替换会去读调用方没有请求的正文，因此这两类直接退成裸 `uri`，不向上加深
@@ -774,7 +774,7 @@ curl -X POST http://localhost:1933/api/v1/search/search \
 - `mode="list"` 下显式携带任何 context 专用参数 → 400
 - `mode="context"` 下传 `target_uri` → 400
 - `quotas` 出现未知键 → 400
-- context 模式下被忽略的字段（`level`、`purpose` 或显式配额生效时的 `limit`）会记录在 `stats.ignored`
+- context 模式下被忽略的字段（`level`、显式配额生效时的 `limit`）会记录在 `stats.ignored`
 
 ---
 

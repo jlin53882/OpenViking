@@ -61,6 +61,7 @@ def _sanitize_floats(obj: Any) -> Any:
 
 router = APIRouter(prefix="/api/v1/search", tags=["search"])
 TimeField = Literal["updated_at", "created_at"]
+MAX_CONTEXT_SEARCH_LIMIT = 1000
 
 
 def _resolve_search_limit(limit: int, node_limit: Optional[int]) -> int:
@@ -231,6 +232,20 @@ class SearchRequest(BaseModel):
         if self.target_uri:
             raise ValueError("target_uri is not supported in mode='context'")
         _reject_unknown_quota_and_detail(self.quotas, self.detail)
+        if self.quotas is None:
+            effective_limit = _resolve_search_limit(self.limit, self.node_limit)
+            if not 1 <= effective_limit <= MAX_CONTEXT_SEARCH_LIMIT:
+                raise ValueError(
+                    "context mode effective limit must be between 1 and "
+                    f"{MAX_CONTEXT_SEARCH_LIMIT}"
+                )
+        else:
+            quota_total = sum(max(0, value) for value in self.quotas.values())
+            if quota_total > MAX_CONTEXT_SEARCH_LIMIT:
+                raise ValueError(
+                    "context mode quota total must not exceed "
+                    f"{MAX_CONTEXT_SEARCH_LIMIT}"
+                )
         return self
 
 
@@ -373,7 +388,7 @@ def _context_ignored_fields(request: SearchRequest) -> List[str]:
     ignored: List[str] = []
     if request.level is not None:
         ignored.append("level")
-    if (request.quotas is not None or request.purpose is not None) and (
+    if request.quotas is not None and (
         "limit" in request.model_fields_set or request.node_limit is not None
     ):
         ignored.append("limit")

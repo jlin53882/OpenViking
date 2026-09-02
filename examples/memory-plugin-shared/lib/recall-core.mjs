@@ -19,15 +19,6 @@ const SOURCES = [
 const DEFAULT_CONTEXT_LIMIT = 10;
 const DEFAULT_CONTEXT_MAX_TOKENS = 1600;
 const DEFAULT_REWRITE_MAX_BULLETS = 6;
-const CODING_QUOTA_WEIGHTS = {
-  events: 1,
-  entities: 2,
-  preferences: 1,
-  experiences: 1,
-  resources: 3,
-  skills: 2,
-};
-
 let userSpaceCache = "";
 
 export function estimateTokens(text) {
@@ -43,19 +34,37 @@ function scaleQuotas(limit, weights) {
     return quotas;
   }
 
-  for (const key of order) quotas[key] = 1;
   const totalWeight = Object.values(weights).reduce((sum, weight) => sum + weight, 0);
-  const ideals = Object.fromEntries(
-    order.map((key) => [key, slots * weights[key] / totalWeight]),
-  );
-  while (order.reduce((sum, key) => sum + quotas[key], 0) < slots) {
-    const key = order.reduce((best, candidate) => (
-      ideals[candidate] - quotas[candidate] > ideals[best] - quotas[best]
-        ? candidate
-        : best
+  const allocations = order.map((key, index) => {
+    const scaled = slots * weights[key];
+    return {
+      key,
+      index,
+      scaled,
+      value: Math.max(1, Math.floor(scaled / totalWeight)),
+    };
+  });
+  let allocated = allocations.reduce((sum, item) => sum + item.value, 0);
+  if (allocated < slots) {
+    allocations.sort((left, right) => (
+      (right.scaled - right.value * totalWeight) - (left.scaled - left.value * totalWeight)
+      || left.index - right.index
     ));
-    quotas[key] += 1;
+    for (const item of allocations.slice(0, slots - allocated)) item.value += 1;
+  } else if (allocated > slots) {
+    allocations.sort((left, right) => (
+      (right.value * totalWeight - right.scaled) - (left.value * totalWeight - left.scaled)
+      || right.index - left.index
+    ));
+    let excess = allocated - slots;
+    for (const item of allocations) {
+      const take = Math.min(excess, item.value - 1);
+      item.value -= take;
+      excess -= take;
+      if (excess === 0) break;
+    }
   }
+  for (const item of allocations) quotas[item.key] = item.value;
   return quotas;
 }
 
@@ -64,10 +73,6 @@ function legacyMemoryQuotas(limit) {
     ...scaleQuotas(limit, { events: 10, entities: 10, preferences: 3 }),
     experiences: 0,
   };
-}
-
-function codingQuotas(limit) {
-  return scaleQuotas(limit, CODING_QUOTA_WEIGHTS);
 }
 
 export function buildRecallEndpointBody(cfg = {}) {
@@ -103,7 +108,7 @@ export function buildContextSearchBody(cfg = {}, options = {}) {
   };
   const limitConfigured = cfg.recallLimitConfigured === true;
   const maxTokensConfigured = cfg.recallMaxTokensConfigured === true;
-  if (limitConfigured) body.quotas = codingQuotas(limit);
+  if (limitConfigured) body.limit = limit;
   if (maxTokensConfigured) body.max_tokens = maxTokens;
   if (cfg.recallPeerScope === "actor") body.peer_scope = "actor";
 

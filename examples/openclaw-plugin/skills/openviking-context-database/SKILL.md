@@ -67,16 +67,16 @@ Core config lives under `plugins.entries.openviking.config`:
 | `peer_role` | `assistant` | Peer identity mode: `none`, `assistant`, or `person`. Session messages use body `peer_id`; data-plane recall/search uses `X-OpenViking-Actor-Peer`. |
 | `peer_prefix` | empty | Optional prefix for assistant `peer_id` / actor peer values when `peer_role=assistant`. |
 | `accountId` / `userId` | empty | Advanced tenant identity headers for root-key or trusted deployments. |
-| `targetUri` | `viking://~/memories` | Default search scope for legacy targeted memory search. |
+| `targetUri` | `viking://~/memories` | Default exact scope for `ov_search` and `memory_forget`; not used by `memory_recall`. |
 | `autoCapture` | `true` | Append sanitized turn text to OpenViking sessions. |
 | `captureMode` | `semantic` | `semantic` or `keyword`; affects server-side extraction filtering. |
 | `captureMaxLength` | `24000` | Max sanitized text length per captured turn. |
 | `autoRecall` | `true` | Run recall before replies and inject relevant context. |
-| `recallTargetTypes` | `user,agent` | Default target types when `targetUri` is omitted. Allowed: `resource`, `user`, `agent`. |
+| `recallTargetTypes` | `user,agent` | Default context-search target types for auto-recall and `memory_recall`. Allowed: `resource`, `user`, `agent`. |
 | `recallResources` | `false` | Compatibility shortcut that appends `resource` to default recall targets when `recallTargetTypes` is unset. |
-| `recallLimit` | `6` | Max selected recall items. |
-| `recallScoreThreshold` | `0.15` | Min score after post-processing. |
-| `recallMaxInjectedChars` | `4000` | Total injected character cap; complete memories that do not fit are skipped. |
+| `recallLimit` | unset (server currently defaults to `10`) | Optional global result limit for auto-recall and `memory_recall`; omitted requests use the server default. |
+| `recallScoreThreshold` | `0.15` | Minimum score sent to server context search. |
+| `recallMaxInjectedChars` | `4000` | Converted to server context-search `max_tokens` for both recall paths. |
 | `commitTokenThresholdRatio` | `0.5` | Async-commit threshold as a fraction (0-1) of the model context window (e.g. 0.5 = 50%); `0` commits every turn. |
 | `commitKeepRecentCount` | `10` | Recent messages kept live after afterTurn commit. Compact always uses `0`. |
 | `bypassSessionPatterns` | empty | Glob-like session keys that completely bypass OpenViking (`*` segment, `**` multi-segment). |
@@ -126,12 +126,11 @@ Semantic search over memories/resources. Use archive tools for session history.
 | Parameter | Required | Description |
 |---|---|---|
 | `query` | Yes | Search query. |
-| `limit` | No | Max selected results. Defaults to `recallLimit`. |
+| `limit` | No | Global result limit. The tool argument wins; otherwise an explicitly configured `recallLimit` is used, then the server default. |
 | `scoreThreshold` | No | Score threshold `0..1`. Defaults to `recallScoreThreshold`. |
-| `targetUri` | No | Exact search URI. If set, only this URI is searched. |
-| `resourceTypes` | No | Array of `resource`, `user`, `agent`; used only when `targetUri` is omitted. |
+| `resourceTypes` | No | Context-search targets: `resource`, `user`, `agent`. Use `ov_search` for an exact URI scope. |
 
-Notes: when `targetUri` is omitted, the plugin resolves a search plan from `resourceTypes` or configured `recallTargetTypes`, fetches more candidates than requested, deduplicates, filters leaf memories, reranks, and respects `recallMaxInjectedChars`.
+Notes: the plugin calls the session-aware context/coding search endpoint and returns its token-budgeted `digest` or `rendered` context directly. It sends an explicit global `limit` unchanged; when no tool or configured limit exists, it sends neither `limit` nor `quotas` and uses the server default.
 
 ### `memory_store`
 

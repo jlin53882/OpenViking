@@ -602,7 +602,8 @@ describe("OpenVikingClient canonical namespace policy", () => {
     });
     expect(contextType).toEqual(["memory", "resource"]);
     expect(detail).toBe("abstract");
-    expect(requestBody).not.toHaveProperty("limit");
+    expect(requestBody.limit).toBe(6);
+    expect(requestBody).not.toHaveProperty("quotas");
     expect(new Headers(init.headers).get("X-OpenViking-Actor-Peer")).toBe("agent-main");
     expect(new Headers(init.headers).get("X-OpenViking-Account")).toBe("acct-123");
     expect(new Headers(init.headers).get("X-OpenViking-User")).toBe("user-456");
@@ -636,6 +637,10 @@ describe("OpenVikingClient canonical namespace policy", () => {
       score: 0.82,
       origin: "self",
     });
+    const [, init] = transport.mock.calls[0] as [string, RequestInit];
+    const requestBody = JSON.parse(String(init.body));
+    expect(requestBody).not.toHaveProperty("limit");
+    expect(requestBody).not.toHaveProperty("quotas");
   });
 
   it("uses the shared session-aware timeout floor", async () => {

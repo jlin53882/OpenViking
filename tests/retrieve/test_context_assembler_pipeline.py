@@ -98,7 +98,7 @@ def test_render_neutralizes_forged_memory_tags():
     assert rendered.endswith("</memory>")
 
 
-def test_coding_purpose_uses_absolute_cross_domain_quotas():
+def test_coding_purpose_scales_cross_domain_quotas_from_global_limit():
     assert normalize_quotas(None, "coding") == {
         "events": 1,
         "entities": 2,
@@ -106,6 +106,30 @@ def test_coding_purpose_uses_absolute_cross_domain_quotas():
         "experiences": 1,
         "resources": 3,
         "skills": 2,
+    }
+    assert normalize_quotas(None, "coding", 1) == {
+        "events": 1,
+        "entities": 1,
+        "preferences": 1,
+        "experiences": 1,
+        "resources": 1,
+        "skills": 1,
+    }
+    assert normalize_quotas(None, "coding", 1_000_000_000) == {
+        "events": 100_000_000,
+        "entities": 200_000_000,
+        "preferences": 100_000_000,
+        "experiences": 100_000_000,
+        "resources": 300_000_000,
+        "skills": 200_000_000,
+    }
+    assert normalize_quotas(None, "chat", 7) == {
+        "events": 2,
+        "entities": 1,
+        "preferences": 1,
+        "experiences": 1,
+        "resources": 1,
+        "skills": 1,
     }
     assert normalize_quotas({"events": 7}, "coding") == {"events": 7}
 
@@ -246,7 +270,7 @@ async def test_resource_bucket_uses_actor_scope_without_other_peer_scan():
     assert [(entry.uri, entry.origin) for entry in result.entries] == [(actor_uri, "actor_peer")]
 
 
-async def test_purpose_quotas_are_not_truncated_by_global_limit():
+async def test_purpose_limit_is_applied_after_cross_domain_ranking():
     async def fake_find(**kwargs):
         target_uri = kwargs["target_uri"]
         leaf = target_uri.rsplit("/", 1)[-1]
@@ -322,15 +346,167 @@ async def test_purpose_quotas_are_not_truncated_by_global_limit():
         ),
     )
 
-    assert len(result.entries) == 10
+    assert len(result.entries) == 1
     assert result.stats["quotas"] == {
         "events": 1,
-        "entities": 2,
+        "entities": 1,
         "preferences": 1,
         "experiences": 1,
-        "resources": 3,
-        "skills": 2,
+        "resources": 1,
+        "skills": 1,
     }
+
+
+async def test_explicit_quotas_remain_absolute_and_ignore_global_limit():
+    hits = [
+        {
+            "uri": f"{USER_ROOT}/memories/events/{index}.md",
+            "score": 0.9 - index * 0.01,
+            "abstract": f"event {index}",
+            "level": 2,
+        }
+        for index in range(2)
+    ]
+
+    result = await assemble_context(
+        service=_service(hits=hits, bodies={}),
+        ctx=_ctx(),
+        params=AssembleParams(
+            query="events",
+            quotas={"events": 2},
+            limit=1,
+            peer_scope="actor",
+            max_tokens=10000,
+        ),
+    )
+
+    assert len(result.entries) == 2
+    assert result.stats["quotas"] == {"events": 2}
+
+
+async def test_purpose_search_keeps_other_memory_categories_reachable():
+    other_uri = f"{USER_ROOT}/memories/cases/server-owned-limit.md"
+
+    async def fake_find(**kwargs):
+        target_uri = kwargs["target_uri"]
+        if target_uri == f"{USER_ROOT}/memories":
+            return _FakeFindResult(
+                memories=[
+                    {
+                        "uri": other_uri,
+                        "score": 0.99,
+                        "abstract": "Server-owned limit",
+                        "level": 2,
+                    }
+                ]
+            )
+        if target_uri.endswith("/memories/events"):
+            return _FakeFindResult(
+                memories=[
+                    {
+                        "uri": f"{target_uri}/event.md",
+                        "score": 0.5,
+                        "abstract": "Named bucket event",
+                        "level": 2,
+                    }
+                ]
+            )
+        return _FakeFindResult()
+
+    service = SimpleNamespace(
+        search=SimpleNamespace(find=fake_find),
+        fs=SimpleNamespace(read=None),
+        sessions=SimpleNamespace(),
+        viking_fs=None,
+    )
+
+    for params in (
+        AssembleParams(query="limits", purpose="coding", peer_scope="actor"),
+        AssembleParams(query="limits", purpose="coding", limit=1, peer_scope="actor"),
+    ):
+        result = await assemble_context(service=service, ctx=_ctx(), params=params)
+        assert len(result.entries) <= params.limit
+        assert other_uri in {entry.uri for entry in result.entries}
+        assert result.stats["searched"][OTHER_MEMORY_CATEGORY] == 1
+
+
+async def test_purpose_resource_only_search_backfills_to_global_limit():
+    resource_hits = [
+        {
+            "uri": f"viking://resources/docs/{index}.md",
+            "score": 0.99 - index * 0.01,
+            "abstract": f"resource {index}",
+            "level": 2,
+        }
+        for index in range(10)
+    ]
+
+    async def fake_find(**kwargs):
+        if kwargs["target_uri"] == "viking://resources":
+            return _FakeFindResult(resources=resource_hits)
+        return _FakeFindResult()
+
+    service = SimpleNamespace(
+        search=SimpleNamespace(find=fake_find),
+        fs=SimpleNamespace(read=None),
+        sessions=SimpleNamespace(),
+        viking_fs=None,
+    )
+    result = await assemble_context(
+        service=service,
+        ctx=_ctx(),
+        params=AssembleParams(
+            query="resource docs",
+            purpose="coding",
+            limit=10,
+            filter={"op": "must", "field": "context_type", "conds": ["resource"]},
+            peer_scope="actor",
+            max_tokens=10000,
+        ),
+    )
+
+    assert len(result.entries) == 10
+    assert {entry.category for entry in result.entries} == {"resources"}
+
+
+async def test_purpose_memory_only_search_backfills_to_global_limit():
+    entity_root = f"{USER_ROOT}/memories/entities"
+    memory_hits = [
+        {
+            "uri": f"{entity_root}/{index}.md",
+            "score": 0.99 - index * 0.01,
+            "abstract": f"entity {index}",
+            "level": 2,
+        }
+        for index in range(10)
+    ]
+
+    async def fake_find(**kwargs):
+        if kwargs["target_uri"] == entity_root:
+            return _FakeFindResult(memories=memory_hits)
+        return _FakeFindResult()
+
+    service = SimpleNamespace(
+        search=SimpleNamespace(find=fake_find),
+        fs=SimpleNamespace(read=None),
+        sessions=SimpleNamespace(),
+        viking_fs=None,
+    )
+    result = await assemble_context(
+        service=service,
+        ctx=_ctx(),
+        params=AssembleParams(
+            query="entities",
+            purpose="coding",
+            limit=10,
+            filter={"op": "must", "field": "context_type", "conds": ["memory"]},
+            peer_scope="actor",
+            max_tokens=10000,
+        ),
+    )
+
+    assert len(result.entries) == 10
+    assert {entry.category for entry in result.entries} == {"entities"}
 
 
 async def test_rewrite_failure_keeps_rendered_context(monkeypatch):

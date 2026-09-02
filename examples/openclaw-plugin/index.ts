@@ -42,11 +42,7 @@ import type { CommandDefinition } from "./plugin/command-registration.js";
 
 import type { HttpTransport } from "./adapters/http-transport.js";
 import { formatMessageFaithful } from "./services/context-message-adapter.js";
-import {
-  clampScore,
-  postProcessMemories,
-  pickMemoriesForInjection,
-} from "./memory-ranking.js";
+import { clampScore } from "./memory-ranking.js";
 import { withTimeout } from "./process-manager.js";
 import {
   createMemoryOpenVikingContextEngine,
@@ -55,9 +51,6 @@ import {
   openClawSessionRefToOvStorageId,
   openClawSessionToOvStorageId,
 } from "./routing/identity-routing.js";
-import {
-  buildMemoryLinesWithBudget,
-} from "./auto-recall.js";
 import {
   normalizeRecallResourceTypes as normalizeResourceTypes,
   resolveRecallSearchPlan,
@@ -289,9 +282,6 @@ const contextEnginePlugin = {
       isBypassedSession,
       makeBypassedToolResult,
       resolveRecallSearchPlan,
-      postProcessMemories,
-      pickMemoriesForInjection,
-      buildMemoryLinesWithBudget,
       inferRecallResourceType,
       createTraceId,
       boundTraceQuery,

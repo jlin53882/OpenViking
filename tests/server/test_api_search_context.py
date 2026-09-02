@@ -125,12 +125,39 @@ async def test_coding_purpose_searches_all_domains_and_actor_resource(
     assert any(target.endswith("/skills") for target in targets)
     assert response.json()["result"]["stats"]["quotas"] == {
         "events": 1,
-        "entities": 2,
+        "entities": 1,
         "preferences": 1,
         "experiences": 1,
-        "resources": 3,
-        "skills": 2,
+        "resources": 1,
+        "skills": 1,
     }
+    assert "ignored" not in response.json()["result"]["stats"]
+
+
+async def test_context_mode_explicit_quotas_keep_limit_ignored(
+    client: httpx.AsyncClient,
+    service,
+    monkeypatch,
+):
+    async def fake_find(**kwargs):
+        del kwargs
+        return _FakeFindResult()
+
+    monkeypatch.setattr(service.search, "find", fake_find)
+    response = await client.post(
+        "/api/v1/search/search",
+        json={
+            "query": "quota",
+            "mode": "context",
+            "purpose": "coding",
+            "quotas": {"events": 2},
+            "limit": 1001,
+            "peer_scope": "actor",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["stats"]["quotas"] == {"events": 2}
     assert response.json()["result"]["stats"]["ignored"] == ["limit"]
 
 
@@ -165,6 +192,21 @@ async def test_context_and_list_default_limit_is_ten(
     assert list_response.status_code == 200
     assert ("context", 10) in limits
     assert ("list", 10) in limits
+
+
+async def test_context_mode_rejects_unbounded_retrieval_width(client: httpx.AsyncClient):
+    for payload in (
+        {"query": "too wide", "mode": "context", "limit": 1001},
+        {"query": "too wide", "mode": "context", "node_limit": 1001},
+        {
+            "query": "too wide",
+            "mode": "context",
+            "quotas": {"events": 600, "resources": 401},
+        },
+    ):
+        response = await client.post("/api/v1/search/search", json=payload)
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "INVALID_ARGUMENT"
 
 
 async def test_context_and_list_parameter_domains_do_not_overlap(client: httpx.AsyncClient):

@@ -56,7 +56,8 @@ async def assemble_context(
     params: AssembleParams,
 ) -> AssembleResult:
     """Run the full assembly pipeline for one request."""
-    quotas = normalize_quotas(params.quotas, params.purpose)
+    purpose_limit = max(1, params.limit) if params.purpose and params.quotas is None else None
+    quotas = normalize_quotas(params.quotas, params.purpose, purpose_limit)
     penalties = normalize_penalties(params.other_peer_penalty)
 
     intent_checker = getattr(service.search, "is_intent_enabled", None)
@@ -86,6 +87,7 @@ async def assemble_context(
         queries=queries,
         quotas=quotas,
         limit=params.limit,
+        global_limit=purpose_limit,
         score_threshold=params.score_threshold,
         filter=params.filter,
         image_url=params.image_url,

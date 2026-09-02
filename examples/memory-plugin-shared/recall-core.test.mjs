@@ -16,7 +16,7 @@ async function tempPath(name) {
   return join(dir, name);
 }
 
-test("context requests preserve the configured recall width and server budget", () => {
+test("context requests send configured recall width without client-side quotas", () => {
   const body = buildContextSearchBody({
     recallLimit: 1,
     recallLimitConfigured: true,
@@ -25,9 +25,8 @@ test("context requests preserve the configured recall width and server budget", 
     recallCompressMaxInputChars: 18000,
   });
 
-  assert.equal(Object.values(body.quotas).reduce((sum, quota) => sum + quota, 0), 6);
-  assert.equal(body.quotas.resources, 1);
-  assert.equal(body.quotas.skills, 1);
+  assert.equal(body.limit, 1);
+  assert.equal(body.quotas, undefined);
   assert.equal(body.max_tokens, 800);
   assert.equal(body.purpose, "coding");
 });
@@ -59,6 +58,12 @@ test("coding-agent fallback recall explicitly uses the 0.35 threshold", () => {
   const body = buildRecallEndpointBody({});
 
   assert.equal(body.min_score, 0.35);
+});
+
+test("legacy fallback quota scaling is bounded for a very large limit", () => {
+  const body = buildRecallEndpointBody({ recallLimit: 1_000_000_000 });
+
+  assert.equal(Object.values(body.quotas).reduce((sum, quota) => sum + quota, 0), 1_000_000_000);
 });
 
 test("buildRecallBlock injects context assembled by the server", async () => {
