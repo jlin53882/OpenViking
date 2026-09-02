@@ -466,7 +466,8 @@ class ConnectorDelegate:
         tags: Optional[List[str]] = None,
         tag_mode: str = "replace",
         wait_for_completion: bool = False,
-        on_success: Optional[Callable[[], Awaitable[None]]] = None,
+        connector_states: Optional[Dict[str, Any]] = None,
+        on_success: Optional[Callable[[Optional[Dict[str, Any]]], Awaitable[None]]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Route add_resource to the external Connector service."""
@@ -610,16 +611,19 @@ class ConnectorDelegate:
             user_id=ctx.user.user_id,
         )
         try:
-            result = await client.submit_doc_add(
-                add_type=add_type,
-                api_key=ctx.api_key,
-                tos_path=tos_path,
-                to=task_resource_id,
-                include_child=True,
-                param_config=param_config,
-                auth_config=auth_config or None,
-                extra_params=extra_params,
-            )
+            submit_kwargs: Dict[str, Any] = {
+                "add_type": add_type,
+                "api_key": ctx.api_key,
+                "tos_path": tos_path,
+                "to": task_resource_id,
+                "include_child": True,
+                "param_config": param_config,
+                "auth_config": auth_config or None,
+                "extra_params": extra_params,
+            }
+            if connector_states is not None:
+                submit_kwargs["stream_states"] = connector_states
+            result = await client.submit_doc_add(**submit_kwargs)
 
             connector_task_key = result.get("task_key") or result.get("TaskKey") or ""
             if not connector_task_key:
@@ -681,7 +685,7 @@ class ConnectorDelegate:
         ctx: RequestContext,
         reason: str = "",
         link_root_uri: str = "",
-        on_success: Optional[Callable[[], Awaitable[None]]] = None,
+        on_success: Optional[Callable[[Optional[Dict[str, Any]]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """Poll the Connector task until terminal state, then update OV TaskRecord.
 
@@ -739,8 +743,17 @@ class ConnectorDelegate:
                             "connector_status": status,
                             "connector_task_key": connector_task_key,
                         }
+                        connector_states = info.get("StreamStates")
+                        if connector_states is None:
+                            connector_states = info.get("stream_states")
+                        if connector_states is not None:
+                            if not isinstance(connector_states, dict):
+                                raise InternalError(
+                                    "Connector task response contains invalid stream states"
+                                )
+                            completion["connector_states"] = connector_states
                         if on_success is not None:
-                            await on_success()
+                            await on_success(connector_states)
                         if (reason or "").strip() and link_root_uri:
                             link_result: Dict[str, Any] = {"root_uri": link_root_uri}
                             await self._link_reason_memory(

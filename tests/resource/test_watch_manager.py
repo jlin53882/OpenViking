@@ -357,6 +357,58 @@ class TestWatchManager:
         assert "auth_state" not in loaded.to_dict()
 
     @pytest.mark.asyncio
+    async def test_connector_states_persisted_and_hidden_from_public_dict(
+        self, mock_viking_fs: MockVikingFS
+    ):
+        manager1 = WatchManager(viking_fs=mock_viking_fs)
+        await manager1.initialize()
+        states = {"documents": {"cursor": {"sync_checkpoint": "2026-09-01T00:00:00+00:00"}}}
+        task = await manager1.create_task(
+            path="tos://bucket/docs/",
+            source_type="tos",
+            to_uri="viking://resources/imports",
+            watch_interval=30.0,
+            auth_state={"provider": "connector_encrypted", "ciphertext": "encrypted"},
+            connector_states=states,
+        )
+
+        manager2 = WatchManager(viking_fs=mock_viking_fs)
+        await manager2.initialize()
+        loaded = await manager2.get_task(task.task_id)
+
+        assert loaded is not None
+        assert loaded.connector_states == states
+        assert "connector_states" not in loaded.to_dict()
+
+    @pytest.mark.asyncio
+    async def test_execution_result_is_persisted_and_public(self, mock_viking_fs: MockVikingFS):
+        manager1 = WatchManager(viking_fs=mock_viking_fs)
+        await manager1.initialize()
+        task = await manager1.create_task(
+            path="tos://bucket/docs/",
+            to_uri="viking://resources/imports",
+            watch_interval=30.0,
+        )
+
+        await manager1.record_execution(
+            task.task_id,
+            status="failed",
+            execution_task_id="ingest-task-1",
+            error="pull failed with Bearer secret-token",
+        )
+
+        manager2 = WatchManager(viking_fs=mock_viking_fs)
+        await manager2.initialize()
+        loaded = await manager2.get_task(task.task_id)
+
+        assert loaded is not None
+        assert loaded.last_task_id == "ingest-task-1"
+        assert loaded.last_status == "failed"
+        assert loaded.last_error == "pull failed with Bearer [REDACTED]"
+        assert loaded.last_execution_time is not None
+        assert loaded.to_dict()["last_error"] == loaded.last_error
+
+    @pytest.mark.asyncio
     async def test_create_task_without_path_raises(self, watch_manager: WatchManager):
         """Test that creating a task without path raises error."""
         with pytest.raises(ValueError, match="Path is required"):
@@ -502,6 +554,7 @@ class TestWatchManager:
         )
 
         assert len(tasks) == 3
+        assert [task.path for task in tasks] == ["/test/path3", "/test/path2", "/test/path1"]
 
     @pytest.mark.asyncio
     async def test_get_all_tasks_active_only(self, watch_manager: WatchManager):

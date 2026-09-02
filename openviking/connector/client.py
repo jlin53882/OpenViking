@@ -64,6 +64,7 @@ class ConnectorClient:
         include_child: bool = True,
         param_config: Optional[Dict[str, Any]] = None,
         auth_config: Optional[Dict[str, Any]] = None,
+        stream_states: Optional[Dict[str, Any]] = None,
         extra_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Submit a document import job via the configured doc/add endpoint.
@@ -89,6 +90,8 @@ class ConnectorClient:
             payload["param_config"] = param_config
         if auth_config:
             payload["auth_config"] = auth_config
+        if stream_states is not None:
+            payload["stream_states"] = stream_states
         if extra_params:
             # Authentication belongs exclusively in the Authorization header.
             payload.update({key: value for key, value in extra_params.items() if key != "api_key"})
@@ -120,4 +123,8 @@ class ConnectorClient:
             return data
         if not isinstance(task, dict):
             raise InternalError("Connector task response contains an invalid Task object")
+        task = dict(task)
+        for key in ("StreamStates", "stream_states"):
+            if key in data:
+                task[key] = data[key]
         return task

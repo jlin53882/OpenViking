@@ -24,9 +24,6 @@ from openviking_cli.exceptions import InvalidArgumentError
 
 router = APIRouter(prefix="/api/v1", tags=["resources"])
 
-_CONNECTOR_TASK_ORIGIN_HEADER = "X-OpenViking-Task-Origin"
-_CONNECTOR_TASK_ORIGIN = "connector_import"
-
 
 class AddResourceRequest(BaseModel):
     """Request model for add_resource.
@@ -56,6 +53,7 @@ class AddResourceRequest(BaseModel):
             Default is False (async processing).
         timeout: Timeout in seconds when wait=True. None means no timeout.
         strict: Whether to use strict mode for processing. Default is True.
+        internal_task: Whether to hide this task from the default task list.
         ignore_dirs: Comma-separated list of directory names to ignore during parsing.
         include: Glob pattern for files to include during parsing.
         exclude: Glob pattern for files to exclude during parsing.
@@ -97,6 +95,7 @@ class AddResourceRequest(BaseModel):
     wait: bool = False
     timeout: Optional[float] = None
     strict: bool = False
+    internal_task: bool = False
     source_name: Optional[str] = None
     ignore_dirs: Optional[str] = None
     include: Optional[str] = None
@@ -300,10 +299,7 @@ async def add_resource(
                 tag_mode=request.tag_mode,
                 allow_local_path_resolution=allow_local_path_resolution,
                 enforce_public_remote_targets=True,
-                internal_task=(
-                    http_request.headers.get(_CONNECTOR_TASK_ORIGIN_HEADER, "").strip().lower()
-                    == _CONNECTOR_TASK_ORIGIN
-                ),
+                internal_task=request.internal_task,
                 args=request.args,
                 **kwargs,
             )

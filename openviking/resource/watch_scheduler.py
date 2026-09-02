@@ -267,6 +267,9 @@ class WatchScheduler:
         cancelled = False
         should_deactivate = False
         deactivation_reason = ""
+        execution_task_id = None
+        execution_status = None
+        execution_error = None
 
         try:
             auth_state = getattr(task, "auth_state", None)
@@ -343,6 +346,9 @@ class WatchScheduler:
                         processor_kwargs["args"] = connector_args
 
                 if not should_deactivate:
+                    refresh_kwargs = {}
+                    if connector_watch:
+                        refresh_kwargs["connector_states"] = getattr(task, "connector_states", None)
                     result = await self._resource_service.refresh_resource(
                         path=task.path,
                         ctx=ctx,
@@ -356,15 +362,50 @@ class WatchScheduler:
                         processing_mode=getattr(task, "processing_mode", "semantic_and_vectors"),
                         watch_interval=task.watch_interval,
                         enforce_public_remote_targets=True,
+                        **refresh_kwargs,
                         **processor_kwargs,
                     )
 
-                    if result.get("status") == "failed":
+                    execution_task_id = result.get("task_id")
+                    result_status = str(result.get("status") or "").lower()
+                    if execution_task_id and result_status not in {
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "error",
+                    }:
+                        from openviking.service.task_tracker import get_task_tracker
+
+                        ingestion_task = await get_task_tracker().wait(
+                            execution_task_id,
+                            account_id=task.account_id,
+                            user_id=task.user_id,
+                        )
+                        result_status = ingestion_task.status.value
+                        execution_error = ingestion_task.error
+
+                    if result_status in {"failed", "error"}:
+                        execution_status = "failed"
+                        if execution_error is None:
+                            execution_error = result.get("error")
+                        if execution_error is None and result.get("errors"):
+                            execution_error = "; ".join(
+                                str(error) for error in result["errors"]
+                            )
+                        execution_error = execution_error or "watch ingestion failed"
                         logger.warning(
                             f"[WatchScheduler] Task {task.task_id} execution finished with "
                             "a failed ingestion task"
                         )
+                    elif result_status == "cancelled":
+                        execution_status = "cancelled"
                     else:
+                        execution_status = "completed"
+                        if connector_watch and "connector_states" in result:
+                            await self._watch_manager.update_connector_states(
+                                task.task_id,
+                                result["connector_states"],
+                            )
                         logger.info(
                             f"[WatchScheduler] Task {task.task_id} executed successfully, "
                             f"result: {result.get('root_uri', 'N/A')}"
@@ -376,10 +417,14 @@ class WatchScheduler:
         except FileNotFoundError as e:
             should_deactivate = True
             deactivation_reason = f"Resource not found: {e}"
+            execution_status = "failed"
+            execution_error = deactivation_reason
             logger.error(
                 f"[WatchScheduler] Task {task.task_id} resource not found: {e}. Deactivating task."
             )
         except Exception as e:
+            execution_status = "failed"
+            execution_error = str(e) or type(e).__name__
             logger.error(
                 f"[WatchScheduler] Task {task.task_id} execution failed, "
                 f"error_type={type(e).__name__}"
@@ -388,6 +433,17 @@ class WatchScheduler:
         finally:
             try:
                 if not cancelled:
+                    if should_deactivate:
+                        execution_status = "failed"
+                        execution_error = deactivation_reason
+                    await asyncio.shield(
+                        self._watch_manager.record_execution(
+                            task.task_id,
+                            status=execution_status or "completed",
+                            execution_task_id=execution_task_id,
+                            error=execution_error,
+                        )
+                    )
                     if should_deactivate:
                         await asyncio.shield(
                             self._watch_manager.update_task(
@@ -402,9 +458,6 @@ class WatchScheduler:
                             f"[WatchScheduler] Deactivated task {task.task_id}: {deactivation_reason}"
                         )
                     else:
-                        await asyncio.shield(
-                            self._watch_manager.update_execution_time(task.task_id)
-                        )
                         logger.info(
                             f"[WatchScheduler] Updated execution time for task {task.task_id}"
                         )

@@ -174,7 +174,7 @@ async def test_add_resource_forwards_args_to_service(
     assert seen["internal_task"] is False
 
 
-async def test_add_resource_marks_connector_child_task_internal(
+async def test_add_resource_forwards_internal_task_to_service(
     client: httpx.AsyncClient,
     service,
     monkeypatch,
@@ -189,8 +189,7 @@ async def test_add_resource_marks_connector_child_task_internal(
 
     resp = await client.post(
         "/api/v1/resources",
-        headers={"X-OpenViking-Task-Origin": "connector_import"},
-        json={"path": "https://example.com/demo.md"},
+        json={"path": "https://example.com/demo.md", "internal_task": True},
     )
 
     assert resp.status_code == 200

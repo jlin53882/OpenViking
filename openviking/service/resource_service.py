@@ -319,6 +319,7 @@ class ResourceService:
         watch_auth_state: Optional[Dict[str, Any]],
         ctx: RequestContext,
         source_type: Optional[str] = None,
+        connector_states: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not watch_manager or not manage_watch:
             return
@@ -360,6 +361,7 @@ class ResourceService:
                         processing_mode=processing_mode,
                         processor_kwargs=sanitized,
                         auth_state=watch_auth_state,
+                        connector_states=connector_states,
                         source_type=source_type or self._infer_watch_source_type(path),
                         ctx=ctx,
                     )
@@ -562,10 +564,9 @@ class ResourceService:
                 account_id=msg.account_id,
                 user_id=msg.user_id,
                 task_id=msg.task_id,
-                meta={
-                    "source_path": msg.source_path,
-                    **({"internal": True} if msg.internal_task else {}),
-                },
+                meta=(
+                    {"internal": True} if msg.internal_task else {"source_path": msg.source_path}
+                ),
                 auth=task_auth,
             )
             await get_queue_manager().enqueue(queue_name, msg.to_dict())
@@ -1246,6 +1247,7 @@ class ResourceService:
         enforce_public_remote_targets: bool = False,
         add_type: Optional[str] = None,
         args: Optional[Dict[str, Any]] = None,
+        connector_states: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """Submit a scheduled refresh without changing its watch task."""
@@ -1268,6 +1270,7 @@ class ResourceService:
             enforce_public_remote_targets=enforce_public_remote_targets,
             add_type=add_type,
             args=args,
+            connector_states=connector_states,
             **kwargs,
         )
 
@@ -1295,6 +1298,7 @@ class ResourceService:
         enforce_public_remote_targets: bool = False,
         internal_task: bool = False,
         args: Optional[Dict[str, Any]] = None,
+        connector_states: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """Validate and route one resource ingestion request.
@@ -1465,10 +1469,12 @@ class ResourceService:
                 tags,
                 tag_mode,
             )
-            on_success: Optional[Callable[[], Awaitable[None]]] = None
+            on_success: Optional[Callable[[Optional[Dict[str, Any]]], Awaitable[None]]] = None
             if defer_watch_creation:
 
-                async def create_watch_after_success() -> None:
+                async def create_watch_after_success(
+                    new_connector_states: Optional[Dict[str, Any]] = None,
+                ) -> None:
                     await self._manage_watch_if_needed(
                         watch_manager=watch_manager,
                         manage_watch=True,
@@ -1487,6 +1493,7 @@ class ResourceService:
                         watch_auth_state=watch_auth_state,
                         ctx=ctx,
                         source_type=resolved[0],
+                        connector_states=new_connector_states,
                     )
 
                 on_success = create_watch_after_success
@@ -1500,6 +1507,7 @@ class ResourceService:
                 tags=tags,
                 tag_mode=tag_mode,
                 wait_for_completion=not manage_watch and watch_interval > 0,
+                connector_states=connector_states,
                 on_success=on_success,
                 **kwargs,
             )
@@ -1931,6 +1939,7 @@ class ResourceService:
         processing_mode: ProcessingMode,
         processor_kwargs: Dict[str, Any],
         auth_state: Optional[Dict[str, Any]],
+        connector_states: Optional[Dict[str, Any]],
         source_type: Optional[str],
         ctx: RequestContext,
     ) -> None:
@@ -1979,6 +1988,7 @@ class ResourceService:
                 processing_mode=processing_mode,
                 processor_kwargs=processor_kwargs,
                 auth_state=auth_state,
+                connector_states=connector_states,
                 is_active=True,
             )
             logger.info(
@@ -2003,6 +2013,7 @@ class ResourceService:
                 processing_mode=processing_mode,
                 processor_kwargs=processor_kwargs,
                 auth_state=auth_state,
+                connector_states=connector_states,
             )
             logger.info(f"[ResourceService] Created watch task {task.task_id} for {to_uri}")
 

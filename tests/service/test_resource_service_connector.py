@@ -530,7 +530,8 @@ async def test_declared_connector_watch_returns_original_add_type(
         to="viking://resources/Project/ptat4n",
         watch_interval=5,
     )
-    await submitted["on_success"]()
+    states = {"documents": {"cursor": {"sync_checkpoint": "2026-09-01T00:00:00+00:00"}}}
+    await submitted["on_success"](states)
 
     task = await watch_manager.get_task_by_uri(
         "viking://resources/Project/ptat4n",
@@ -540,6 +541,7 @@ async def test_declared_connector_watch_returns_original_add_type(
     )
     assert task is not None
     assert task.source_type == "feishu_project"
+    assert task.connector_states == states
 
 
 @pytest.mark.asyncio
@@ -553,7 +555,11 @@ async def test_connector_watch_scheduler_restores_request_credentials(
         resource_processor=object(),
         skill_processor=object(),
     )
-    service.refresh_resource = AsyncMock(return_value={"status": "completed"})
+    old_states = {"documents": {"cursor": {"sync_checkpoint": "2026-09-01T00:00:00+00:00"}}}
+    new_states = {"documents": {"cursor": {"sync_checkpoint": "2026-09-02T00:00:00+00:00"}}}
+    service.refresh_resource = AsyncMock(
+        return_value={"status": "completed", "connector_states": new_states}
+    )
     scheduler = WatchScheduler(resource_service=service)
     watch_manager = WatchManager()
     scheduler._watch_manager = watch_manager
@@ -571,6 +577,7 @@ async def test_connector_watch_scheduler_restores_request_credentials(
         account_id="acct",
         user_id="alice",
         auth_state=auth_state,
+        connector_states=old_states,
     )
 
     await scheduler._execute_stable_task(task)
@@ -579,6 +586,44 @@ async def test_connector_watch_scheduler_restores_request_credentials(
     assert call.kwargs["ctx"].api_key == "secret"
     assert call.kwargs["add_type"] == "tos"
     assert call.kwargs["args"] == {"tos_prefix": ["tos://bucket/docs/"]}
+    assert call.kwargs["connector_states"] == old_states
+    updated = await watch_manager.get_task(task.task_id)
+    assert updated is not None
+    assert updated.connector_states == new_states
+
+
+@pytest.mark.asyncio
+async def test_failed_connector_watch_keeps_previous_stream_states(connector_config):
+    service = ResourceService()
+    service.refresh_resource = AsyncMock(return_value={"status": "failed"})
+    scheduler = WatchScheduler(resource_service=service)
+    watch_manager = WatchManager()
+    scheduler._watch_manager = watch_manager
+    old_states = {"documents": {"cursor": {"sync_checkpoint": "2026-09-01T00:00:00+00:00"}}}
+    task = await watch_manager.create_task(
+        path="tos://bucket/docs/",
+        to_uri="viking://resources/x/y",
+        watch_interval=5,
+        account_id="acct",
+        user_id="alice",
+        auth_state={
+            "provider": "connector_plaintext",
+            "request": {
+                "api_key": "secret",
+                "account_id": "acct",
+                "add_type": "tos",
+                "path": "tos://bucket/docs/",
+                "connector_args": {},
+            },
+        },
+        connector_states=old_states,
+    )
+
+    await scheduler._execute_stable_task(task)
+
+    updated = await watch_manager.get_task(task.task_id)
+    assert updated is not None
+    assert updated.connector_states == old_states
 
 
 @pytest.mark.asyncio
@@ -619,15 +664,18 @@ async def test_connector_watch_refresh_waits_for_remote_completion(
 ):
     service._connector.submit = AsyncMock(return_value={"status": "completed"})
 
+    states = {"documents": {"cursor": {"sync_checkpoint": "2026-09-01T00:00:00+00:00"}}}
     await service.refresh_resource(
         path="tos://bucket/docs/",
         ctx=ctx,
         to="viking://resources/x/y",
         watch_interval=5,
         add_type="tos",
+        connector_states=states,
     )
 
     assert service._connector.submit.await_args.kwargs["wait_for_completion"] is True
+    assert service._connector.submit.await_args.kwargs["connector_states"] == states
 
 
 @pytest.mark.asyncio
@@ -1971,7 +2019,7 @@ async def test_monitor_connector_task_maps_terminal_status(
     assert tracker.update_stage.await_args.args[1] == expected_stage
     if expected_error is None:
         assert outcome["status"] == "completed"
-        on_success.assert_awaited_once_with()
+        on_success.assert_awaited_once_with(None)
         tracker.complete.assert_awaited_once()
         tracker.fail.assert_not_awaited()
     else:
@@ -1979,6 +2027,42 @@ async def test_monitor_connector_task_maps_terminal_status(
         on_success.assert_not_awaited()
         assert tracker.fail.await_args.args[1] == expected_error
         tracker.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_monitor_returns_external_connector_stream_states(
+    monkeypatch,
+    connector_config,
+    ctx,
+):
+    tracker = _task_tracker()
+    monkeypatch.setattr(
+        "openviking.service.task_tracker.get_task_tracker",
+        lambda: tracker,
+    )
+
+    async def no_sleep(_seconds):
+        pass
+
+    monkeypatch.setattr(connector_delegate_module.asyncio, "sleep", no_sleep)
+    states = {"documents": {"cursor": {"sync_checkpoint": "2026-09-02T00:00:00+00:00"}}}
+    client = SimpleNamespace(
+        get_task_info=AsyncMock(return_value={"Status": "succeeded", "StreamStates": states})
+    )
+    on_success = AsyncMock()
+
+    outcome = await ResourceService()._connector._monitor(
+        client=client,
+        connector_task_key="connector-1",
+        ov_task_id="task-1",
+        poll_interval_ms=1,
+        timeout_seconds=1,
+        ctx=ctx,
+        on_success=on_success,
+    )
+
+    assert outcome["connector_states"] == states
+    on_success.assert_awaited_once_with(states)
 
 
 @pytest.mark.asyncio
