@@ -1,3 +1,4 @@
+import copy
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -318,7 +319,9 @@ async def test_agent_loop_limits_media_across_parallel_tool_results(temp_dir: Pa
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_limits_media_across_consecutive_tool_rounds(temp_dir: Path, monkeypatch):
+async def test_agent_loop_prefers_new_media_across_consecutive_tool_rounds(
+    temp_dir: Path, monkeypatch
+):
     monkeypatch.setattr(AgentLoop, "_register_builtin_hooks", lambda self: None)
     monkeypatch.setattr(AgentLoop, "_register_default_tools", lambda self: None)
     monkeypatch.setattr("vikingbot.agent.loop.SubagentManager", _FakeSubagentManager)
@@ -330,7 +333,7 @@ async def test_agent_loop_limits_media_across_consecutive_tool_rounds(temp_dir: 
             self.calls = []
 
         async def chat(self, messages, tools=None, **kwargs):
-            self.calls.append(messages)
+            self.calls.append(copy.deepcopy(messages))
             call_number = len(self.calls)
             if call_number <= 2:
                 return LLMResponse(
@@ -398,10 +401,13 @@ async def test_agent_loop_limits_media_across_consecutive_tool_rounds(temp_dir: 
     )
 
     assert final == "done"
+    first_round_tool = next(message for message in provider.calls[1] if message["role"] == "tool")
+    assert isinstance(first_round_tool["content"], list)
+
     tool_messages = [message for message in provider.calls[-1] if message["role"] == "tool"]
-    assert isinstance(tool_messages[0]["content"], list)
-    assert isinstance(tool_messages[1]["content"], str)
-    assert "make this model request exceed" in tool_messages[1]["content"]
+    assert isinstance(tool_messages[0]["content"], str)
+    assert "earlier tool result was omitted" in tool_messages[0]["content"]
+    assert isinstance(tool_messages[1]["content"], list)
 
 
 def test_agent_loop_omits_spawn_tool_when_subagents_disabled(temp_dir: Path, monkeypatch):

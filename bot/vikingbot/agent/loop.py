@@ -94,6 +94,42 @@ def _inline_media_bytes(messages: list[dict]) -> int:
     return total
 
 
+def _demote_historical_tool_media(
+    messages: list[dict], *, history_end: int, bytes_needed: int
+) -> int:
+    candidates: list[tuple[dict, int]] = []
+    reclaimable_bytes = 0
+    for message in messages[:history_end]:
+        if message.get("role") != "tool" or not isinstance(message.get("content"), list):
+            continue
+        media_bytes = _inline_media_bytes([message])
+        if media_bytes <= 0:
+            continue
+        candidates.append((message, media_bytes))
+        reclaimable_bytes += media_bytes
+        if reclaimable_bytes >= bytes_needed:
+            break
+
+    if reclaimable_bytes < bytes_needed:
+        return 0
+
+    for message, _media_bytes in candidates:
+        text_parts = [
+            part["text"]
+            for part in message["content"]
+            if isinstance(part, dict)
+            and part.get("type") in {"text", "input_text"}
+            and isinstance(part.get("text"), str)
+        ]
+        text = "\n".join(text_parts)
+        omission_note = (
+            "Media content from this earlier tool result was omitted from subsequent "
+            "requests to keep the inline media budget."
+        )
+        message["content"] = f"{text}\n\n{omission_note}" if text else omission_note
+    return reclaimable_bytes
+
+
 def _compact_render_message(message: dict) -> str:
     role = message.get("role")
     content = message.get("content")
@@ -1629,6 +1665,7 @@ class AgentLoop:
 
                 # Stage 3: Process results sequentially in original order
                 turn_tools: list[dict[str, Any]] = []
+                history_end = len(messages)
                 request_media_bytes = _inline_media_bytes(messages)
                 for _idx, tool_call, outcome, tool_execute_duration in results:
                     result = outcome.result
@@ -1655,17 +1692,30 @@ class AgentLoop:
                                 f"{result_text}\n\nMedia content was omitted because the configured "
                                 "model provider does not support media in tool results."
                             )
-                        elif (
-                            request_media_bytes + result_media_bytes
-                            > MAX_INLINE_TOOL_RESULT_MEDIA_BYTES
-                        ):
-                            model_result = (
-                                f"{result_text}\n\nMedia content was omitted because adding it would "
-                                "make this model request exceed the inline media "
-                                f"limit of {MAX_INLINE_TOOL_RESULT_MEDIA_BYTES} bytes."
-                            )
                         else:
-                            request_media_bytes += result_media_bytes
+                            overflow = (
+                                request_media_bytes
+                                + result_media_bytes
+                                - MAX_INLINE_TOOL_RESULT_MEDIA_BYTES
+                            )
+                            if overflow > 0:
+                                reclaimed = _demote_historical_tool_media(
+                                    messages,
+                                    history_end=history_end,
+                                    bytes_needed=overflow,
+                                )
+                                request_media_bytes -= reclaimed
+                            if (
+                                request_media_bytes + result_media_bytes
+                                > MAX_INLINE_TOOL_RESULT_MEDIA_BYTES
+                            ):
+                                model_result = (
+                                    f"{result_text}\n\nMedia content was omitted because adding it would "
+                                    "make this model request exceed the inline media "
+                                    f"limit of {MAX_INLINE_TOOL_RESULT_MEDIA_BYTES} bytes."
+                                )
+                            else:
+                                request_media_bytes += result_media_bytes
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, model_result
                     )
