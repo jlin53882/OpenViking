@@ -1130,10 +1130,6 @@ async def test_add_resource_non_wait_queue_task_queryable(
     sample_markdown_file,
     upload_temp_dir,
 ):
-    from openviking.service.task_tracker import set_task_tracker
-
-    set_task_tracker(None)
-
     resp = await client.post(
         "/api/v1/resources",
         json={

@@ -1068,7 +1068,7 @@ class ResourceService:
                 await self._viking_fs.delete_temp(plan.staged_source.temp_uri, ctx=ctx)
             raise
 
-        response = {"status": "success", "task_id": task.task_id}
+        response = {"status": "success", "task_id": task.task_id, "source_path": msg.source_path}
         if not defer_target_resolution:
             response["root_uri"] = root_uri
         return response
