@@ -641,7 +641,63 @@ class SemanticProcessor(DequeueHandlerBase):
         file_paths.sort()
 
         if not file_paths:
-            logger.info(f"No memory files found in {dir_uri}")
+            # Phase 2: Parent Rollup
+            # When directory has only subdirectories (no .md files),
+            # collect child .abstract.md files and generate parent abstract.
+            child_abstracts = []
+            child_names = []
+            
+            for entry in entries:
+                if not entry.get("isDir", False):
+                    continue
+                child_name = entry.get("name", "")
+                if not child_name or child_name.startswith(".") or child_name in [".", ".."]:
+                    continue
+                
+                child_uri = VikingURI(dir_uri).join(child_name).uri
+                try:
+                    child_abstract = await viking_fs.read_file(
+                        f"{child_uri}/.abstract.md", ctx=ctx
+                    )
+                    # Skip placeholder and empty content
+                    if (child_abstract 
+                        and "[Directory abstract is not ready]" not in child_abstract
+                        and child_abstract.strip()):
+                        child_abstracts.append(f"## {child_name}\n{child_abstract}")
+                        child_names.append(child_name)
+                except Exception as e:
+                    # Read failure doesn't affect other children
+                    logger.debug(f"Failed to read child abstract for {child_uri}: {e}")
+            
+            if child_abstracts:
+                # Has child abstracts, generate parent abstract
+                overview = "\n\n".join(child_abstracts)
+                abstract = f"Parent directory containing: {', '.join(child_names)}"
+                
+                try:
+                    wrote_semantics = await self._write_memory_directory_semantics(
+                        msg=msg,
+                        viking_fs=viking_fs,
+                        dir_uri=dir_uri,
+                        overview=overview,
+                        abstract=abstract,
+                        ctx=ctx,
+                        lock=lock,
+                        total_entries=0,
+                        sampled_entries=0,
+                    )
+                    if wrote_semantics.wrote:
+                        logger.info(
+                            f"Generated parent abstract from {len(child_abstracts)} child rollups for {dir_uri}"
+                        )
+                except LockAcquisitionError:
+                    # Lock failure, re-raise for outer handler
+                    raise
+                except Exception as e:
+                    logger.warning(f"Failed to write parent abstract for {dir_uri}: {e}")
+            else:
+                logger.info(f"No memory files or child abstracts found in {dir_uri}")
+            
             return
 
         existing_summaries: Dict[str, str] = {}
