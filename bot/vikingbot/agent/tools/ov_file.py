@@ -1205,7 +1205,6 @@ class VikingMultiReadTool(OVFileTool):
                 return MultimodalToolResult(
                     text=text_result,
                     content=content_parts,
-                    media_bytes=inline_media_bytes,
                 )
             return text_result
 

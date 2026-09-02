@@ -61,6 +61,39 @@ def _compact_msg_chars(messages: list[dict]) -> int:
     return sum(len(json.dumps(m, ensure_ascii=False, default=str)) for m in messages)
 
 
+def _base64_data_url_bytes(url: str) -> int:
+    if not url.startswith("data:"):
+        return 0
+    marker = ";base64,"
+    marker_index = url.find(marker)
+    if marker_index < 0:
+        return 0
+    encoded_length = len(url) - marker_index - len(marker)
+    if encoded_length <= 0:
+        return 0
+    padding = 2 if url.endswith("==") else 1 if url.endswith("=") else 0
+    return max(0, encoded_length * 3 // 4 - padding)
+
+
+def _inline_media_bytes(messages: list[dict]) -> int:
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") not in {
+                "image_url",
+                "input_image",
+            }:
+                continue
+            image_url = part.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, dict) else image_url
+            if isinstance(url, str):
+                total += _base64_data_url_bytes(url)
+    return total
+
+
 def _compact_render_message(message: dict) -> str:
     role = message.get("role")
     content = message.get("content")
@@ -1596,7 +1629,7 @@ class AgentLoop:
 
                 # Stage 3: Process results sequentially in original order
                 turn_tools: list[dict[str, Any]] = []
-                turn_media_bytes = 0
+                request_media_bytes = _inline_media_bytes(messages)
                 for _idx, tool_call, outcome, tool_execute_duration in results:
                     result = outcome.result
                     result_text = str(result)
@@ -1616,22 +1649,23 @@ class AgentLoop:
                         )
                     model_result = result
                     if isinstance(result, MultimodalToolResult):
+                        result_media_bytes = _inline_media_bytes([{"content": result.content}])
                         if not self.provider.supports_tool_result_media(self.model):
                             model_result = (
                                 f"{result_text}\n\nMedia content was omitted because the configured "
                                 "model provider does not support media in tool results."
                             )
                         elif (
-                            turn_media_bytes + result.media_bytes
+                            request_media_bytes + result_media_bytes
                             > MAX_INLINE_TOOL_RESULT_MEDIA_BYTES
                         ):
                             model_result = (
-                                f"{result_text}\n\nMedia content was omitted because the combined "
-                                "tool results for this model request exceed the inline media "
+                                f"{result_text}\n\nMedia content was omitted because adding it would "
+                                "make this model request exceed the inline media "
                                 f"limit of {MAX_INLINE_TOOL_RESULT_MEDIA_BYTES} bytes."
                             )
                         else:
-                            turn_media_bytes += result.media_bytes
+                            request_media_bytes += result_media_bytes
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, model_result
                     )

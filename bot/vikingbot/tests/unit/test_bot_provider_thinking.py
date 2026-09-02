@@ -4,6 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from openviking.models.vlm.backends.litellm_vlm import (
+    LiteLLMVLMProvider as OpenVikingLiteLLMVLMProvider,
+)
 from vikingbot.config.schema import AgentsConfig
 from vikingbot.providers.litellm_provider import LiteLLMProvider
 from vikingbot.providers.vlm_adapter import VLMProviderAdapter
@@ -77,6 +80,23 @@ def test_litellm_provider_exposes_anthropic_tool_result_media_only():
 
     assert anthropic.supports_tool_result_media() is True
     assert openai.supports_tool_result_media() is False
+
+
+def test_vlm_adapter_uses_litellm_resolved_provider_for_tool_result_media():
+    vlm = OpenVikingLiteLLMVLMProvider(
+        {
+            "provider": "litellm",
+            "model": "claude-sonnet-4-5",
+        }
+    )
+    provider = VLMProviderAdapter(
+        vlm,
+        default_model="claude-sonnet-4-5",
+        langfuse_client=SimpleNamespace(),
+    )
+
+    assert vlm.resolved_provider() == "anthropic"
+    assert provider.supports_tool_result_media() is True
 
 
 def test_make_provider_passes_default_thinking_to_vlm_adapter(monkeypatch):

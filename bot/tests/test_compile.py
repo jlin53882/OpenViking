@@ -1399,7 +1399,6 @@ async def test_multi_read_returns_images_as_tool_result_content(monkeypatch):
     assert isinstance(result, MultimodalToolResult)
     assert f"START OF {image_uri}" in str(result)
     assert "Image resource (image/png" in str(result)
-    assert result.media_bytes == len(image_bytes)
     assert result.content[2] == {
         "type": "image_url",
         "image_url": {
@@ -1472,7 +1471,6 @@ async def test_multi_read_limits_aggregate_inline_image_bytes(monkeypatch):
     result = await tool.execute(ToolContext(), uris=[first_uri, second_uri])
 
     assert isinstance(result, MultimodalToolResult)
-    assert result.media_bytes == len(first_image)
     assert sum(part.get("type") == "image_url" for part in result.content) == 1
     assert "combined inline media size" in str(result)
 

@@ -740,7 +740,11 @@ class VLMProviderAdapter(LLMProvider):
                 primary
             ) and cls._backend_supports_tool_result_media(backup)
 
-        provider = str(getattr(vlm, "provider", "") or "").lower()
+        resolve_provider = getattr(vlm, "resolved_provider", None)
+        provider = (
+            resolve_provider() if callable(resolve_provider) else getattr(vlm, "provider", "")
+        )
+        provider = str(provider or "").lower()
         return provider in {"anthropic", "openai-codex"}
 
     # ------------------------------------------------------------------

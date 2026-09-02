@@ -14,7 +14,6 @@ class MultimodalToolResult:
 
     text: str
     content: list[dict[str, Any]]
-    media_bytes: int
 
     def __str__(self) -> str:
         return self.text
