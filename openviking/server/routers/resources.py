@@ -80,6 +80,9 @@ class AddResourceRequest(BaseModel):
             eventually consistent: the Watch is created only after the background import
             succeeds, so overlapping imports may both write before Watch finalization
             reports the conflict.
+        is_active: Initial Watch state for Connector and native Feishu imports. When false,
+            requires watch_interval > 0 and an explicit to target; the inactive Watch is
+            visible immediately while the initial import continues in the background.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -105,6 +108,7 @@ class AddResourceRequest(BaseModel):
     args: Dict[str, Any] = Field(default_factory=dict)
     telemetry: TelemetryRequest = False
     watch_interval: float = 0
+    is_active: bool = True
     processing_mode: ProcessingMode = DEFAULT_PROCESSING_MODE
     tags: Optional[list[str]] = None
     tag_mode: str = "replace"
@@ -127,6 +131,12 @@ class AddResourceRequest(BaseModel):
             raise ValueError("'add_type' cannot be combined with 'parent'")
         if self.add_type and not self.to:
             raise ValueError("'add_type' requires an exact 'to' target")
+        return self
+
+    @model_validator(mode="after")
+    def check_paused_watch(self):
+        if self.is_active is False and (self.watch_interval <= 0 or not self.to):
+            raise ValueError("is_active=false requires watch_interval > 0 and an explicit 'to'")
         return self
 
 
@@ -300,6 +310,7 @@ async def add_resource(
                 allow_local_path_resolution=allow_local_path_resolution,
                 enforce_public_remote_targets=True,
                 internal_task=request.internal_task,
+                is_active=request.is_active,
                 args=request.args,
                 **kwargs,
             )

@@ -249,6 +249,29 @@ class TestWatchManager:
         assert task.next_execution_time is not None
 
     @pytest.mark.asyncio
+    async def test_create_inactive_task_has_no_next_execution(self, watch_manager: WatchManager):
+        task = await watch_manager.create_task(
+            path="/test/path",
+            to_uri="viking://resources/paused",
+            watch_interval=30.0,
+            is_active=False,
+        )
+
+        assert task.is_active is False
+        assert task.next_execution_time is None
+        assert task in await watch_manager.get_all_tasks(
+            TEST_ACCOUNT_ID,
+            TEST_USER_ID,
+            TEST_ROLE,
+        )
+        assert task not in await watch_manager.get_all_tasks(
+            TEST_ACCOUNT_ID,
+            TEST_USER_ID,
+            TEST_ROLE,
+            active_only=True,
+        )
+
+    @pytest.mark.asyncio
     async def test_deactivate_tasks_under_uri_internal_matches_subtree(
         self, watch_manager_no_fs: WatchManager
     ):

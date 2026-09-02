@@ -422,6 +422,7 @@ class WatchManager:
         processor_kwargs: Optional[Dict[str, Any]] = None,
         auth_state: Optional[Dict[str, Any]] = None,
         connector_states: Optional[Dict[str, Any]] = None,
+        is_active: bool = True,
     ) -> WatchTask:
         """Create and persist a watch task while its target URI is stable."""
         if not path:
@@ -452,12 +453,15 @@ class WatchManager:
                     processor_kwargs=processor_kwargs or {},
                     auth_state=auth_state,
                     connector_states=connector_states,
+                    is_active=is_active,
                     account_id=account_id,
                     user_id=user_id,
                     original_role=original_role,
                 )
 
-                task.next_execution_time = task.calculate_next_execution_time()
+                task.next_execution_time = (
+                    task.calculate_next_execution_time() if task.is_active else None
+                )
 
                 self._tasks[task.task_id] = task
                 if to_uri:

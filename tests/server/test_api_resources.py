@@ -30,6 +30,7 @@ def test_add_resource_request_defaults_processing_mode():
     request = AddResourceRequest(path="https://example.com/demo.md")
 
     assert request.processing_mode == "semantic_and_vectors"
+    assert request.is_active is True
 
 
 def test_add_resource_request_accepts_declared_add_type():
@@ -41,6 +42,33 @@ def test_add_resource_request_accepts_declared_add_type():
 
     assert request.add_type == "feishu"
     assert request.to == "viking://resources/feishu"
+
+
+def test_add_resource_request_accepts_paused_connector_watch():
+    request = AddResourceRequest(
+        path="tos://bucket/docs/",
+        to="viking://resources/docs",
+        watch_interval=30,
+        is_active=False,
+    )
+
+    assert request.is_active is False
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"watch_interval": 0, "to": "viking://resources/docs"},
+        {"watch_interval": 30},
+    ],
+)
+def test_add_resource_request_rejects_invalid_paused_watch(kwargs):
+    with pytest.raises(ValueError, match="is_active=false"):
+        AddResourceRequest(
+            path="tos://bucket/docs/",
+            is_active=False,
+            **kwargs,
+        )
 
 
 def test_add_resource_request_rejects_add_type_with_temp_file_id():
@@ -172,6 +200,34 @@ async def test_add_resource_forwards_args_to_service(
     assert resp.status_code == 200
     assert seen["args"] == {"feishu_access_token": "u-test"}
     assert seen["internal_task"] is False
+
+
+async def test_add_resource_forwards_paused_watch_to_service(
+    client: httpx.AsyncClient,
+    service,
+    monkeypatch,
+):
+    seen = {}
+
+    async def fake_add_resource(**kwargs):
+        seen.update(kwargs)
+        return {"status": "accepted", "task_id": "task-1"}
+
+    monkeypatch.setattr(service.resources, "add_resource", fake_add_resource)
+
+    resp = await client.post(
+        "/api/v1/resources",
+        json={
+            "path": "tos://bucket/docs/",
+            "to": "viking://resources/docs",
+            "watch_interval": 30,
+            "is_active": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert seen["watch_interval"] == 30
+    assert seen["is_active"] is False
 
 
 async def test_add_resource_forwards_internal_task_to_service(

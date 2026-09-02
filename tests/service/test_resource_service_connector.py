@@ -264,6 +264,143 @@ async def test_connector_watch_stores_only_encrypted_replay_state(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_info", "expected_status", "expected_error"),
+    [
+        (
+            {
+                "Status": "succeeded",
+                "StreamStates": {"documents": {"cursor": {"page_token": "next"}}},
+            },
+            "completed",
+            None,
+        ),
+        (
+            {"Status": "failed", "ErrorMessage": "source unavailable"},
+            "failed",
+            "connector task failed: source unavailable",
+        ),
+    ],
+)
+async def test_paused_connector_watch_is_visible_before_import_finishes(
+    monkeypatch,
+    connector_config,
+    ctx,
+    task_info,
+    expected_status,
+    expected_error,
+):
+    tracker = _task_tracker()
+    release_import = asyncio.Event()
+
+    async def get_task_info(_task_key, _api_key):
+        await release_import.wait()
+        return task_info
+
+    connector_client = SimpleNamespace(
+        submit_doc_add=AsyncMock(return_value={"task_key": "connector-1"}),
+        get_task_info=AsyncMock(side_effect=get_task_info),
+    )
+    _install_connector_dependencies(
+        monkeypatch,
+        tracker,
+        connector_client,
+        discard_monitor=False,
+    )
+    watch_manager = WatchManager()
+    service = ResourceService(
+        vikingdb=object(),
+        viking_fs=SimpleNamespace(
+            exists=AsyncMock(return_value=True),
+            _encryptor=_FakeEncryptor(),
+        ),
+        resource_processor=object(),
+        skill_processor=object(),
+        watch_scheduler=SimpleNamespace(watch_manager=watch_manager),
+    )
+    to_uri = "viking://resources/x/y"
+
+    result = await service.add_resource(
+        path="tos://bucket/docs/",
+        ctx=ctx,
+        to=to_uri,
+        watch_interval=5,
+        is_active=False,
+    )
+
+    task = await watch_manager.get_task_by_uri(
+        to_uri,
+        account_id="acct",
+        user_id="alice",
+        role=str(Role.USER),
+    )
+    assert task is not None
+    assert task.is_active is False
+    assert task.next_execution_time is None
+    assert task.last_status is None
+
+    release_import.set()
+    await asyncio.gather(*list(service._background_tasks))
+
+    assert task.is_active is False
+    assert task.last_task_id == result["task_id"]
+    assert task.last_status == expected_status
+    assert task.last_error == expected_error
+    if expected_status == "completed":
+        assert task.connector_states == task_info["StreamStates"]
+    else:
+        assert task.connector_states is None
+
+
+@pytest.mark.asyncio
+async def test_paused_watch_option_rejects_non_connector_source(
+    connector_config,
+    ctx,
+    service,
+):
+    with pytest.raises(InvalidArgumentError, match="only supported for Connector"):
+        await service.add_resource(
+            path="https://example.com/docs.md",
+            ctx=ctx,
+            to="viking://resources/docs",
+            watch_interval=5,
+            is_active=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_paused_connector_watch_keeps_submission_failure(
+    connector_config,
+    ctx,
+    service,
+):
+    watch_manager = WatchManager()
+    service._watch_scheduler = SimpleNamespace(watch_manager=watch_manager)
+    service._connector.submit = AsyncMock(side_effect=RuntimeError("submission unavailable"))
+    to_uri = "viking://resources/docs"
+
+    with pytest.raises(RuntimeError, match="submission unavailable"):
+        await service.add_resource(
+            path="tos://bucket/docs/",
+            ctx=ctx,
+            to=to_uri,
+            watch_interval=5,
+            is_active=False,
+        )
+
+    task = await watch_manager.get_task_by_uri(
+        to_uri,
+        account_id="acct",
+        user_id="alice",
+        role=str(Role.USER),
+    )
+    assert task is not None
+    assert task.is_active is False
+    assert task.last_status == "failed"
+    assert task.last_error == "submission unavailable"
+
+
+@pytest.mark.asyncio
 async def test_connector_watch_prechecks_only_active_conflicts(
     monkeypatch,
     connector_config,

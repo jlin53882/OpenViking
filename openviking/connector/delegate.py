@@ -468,6 +468,9 @@ class ConnectorDelegate:
         wait_for_completion: bool = False,
         connector_states: Optional[Dict[str, Any]] = None,
         on_success: Optional[Callable[[Optional[Dict[str, Any]]], Awaitable[None]]] = None,
+        on_complete: Optional[
+            Callable[[str, Optional[str], Optional[str]], Awaitable[None]]
+        ] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Route add_resource to the external Connector service."""
@@ -647,17 +650,36 @@ class ConnectorDelegate:
             )
             raise
 
-        monitor = self._monitor(
-            client=client,
-            connector_task_key=connector_task_key,
-            ov_task_id=task.task_id,
-            poll_interval_ms=config.poll_interval_ms,
-            timeout_seconds=config.timeout_seconds,
-            ctx=ctx,
-            reason=reason,
-            link_root_uri=task_resource_id or "viking://resources",
-            on_success=on_success,
-        )
+        async def run_monitor() -> Dict[str, Any]:
+            try:
+                outcome = await self._monitor(
+                    client=client,
+                    connector_task_key=connector_task_key,
+                    ov_task_id=task.task_id,
+                    poll_interval_ms=config.poll_interval_ms,
+                    timeout_seconds=config.timeout_seconds,
+                    ctx=ctx,
+                    reason=reason,
+                    link_root_uri=task_resource_id or "viking://resources",
+                    on_success=on_success,
+                )
+            except asyncio.CancelledError:
+                if on_complete is not None:
+                    await on_complete(
+                        "failed",
+                        task.task_id,
+                        "background connector task monitoring cancelled",
+                    )
+                raise
+            if on_complete is not None:
+                await on_complete(
+                    str(outcome.get("status") or "failed"),
+                    task.task_id,
+                    outcome.get("error"),
+                )
+            return outcome
+
+        monitor = run_monitor()
 
         response = {
             "status": "accepted",
