@@ -568,6 +568,58 @@ def test_codex_translates_tool_history_into_responses_input(mock_resolve, mock_o
     ]
 
 
+@patch("openviking.models.vlm.backends.codex_vlm.openai.OpenAI")
+@patch("openviking.models.vlm.backends.codex_vlm.resolve_codex_runtime_credentials")
+def test_codex_preserves_images_in_function_call_output(mock_resolve, mock_openai_class):
+    mock_resolve.return_value = {
+        "api_key": "oauth-token",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+    }
+    mock_real_client = MagicMock()
+    mock_real_client.responses.create.return_value = _MockResponsesStream(
+        _build_final_response("image inspected")
+    )
+    mock_openai_class.return_value = mock_real_client
+    image_url = "data:image/png;base64,aW1hZ2U="
+
+    vlm = CodexVLM({"provider": "openai-codex", "model": "gpt-5.3-codex"})
+    result = vlm.get_completion(
+        messages=[
+            {"role": "user", "content": "Inspect the image"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_image", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    {"type": "text", "text": "Source: image.png"},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            },
+        ]
+    )
+
+    assert result == "image inspected"
+    input_items = mock_real_client.responses.create.call_args.kwargs["input"]
+    assert input_items[-1] == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": [
+            {"type": "input_text", "text": "Source: image.png"},
+            {"type": "input_image", "image_url": image_url},
+        ],
+    }
+
+
 def test_codex_auth_invalid_exp_claim_is_treated_as_expiring():
     assert codex_auth._codex_access_token_is_expiring("not-a-jwt", skew_seconds=60) is True
     assert (

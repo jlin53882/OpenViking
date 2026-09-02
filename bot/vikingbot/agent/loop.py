@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from openviking.utils.media_limits import MAX_INLINE_TOOL_RESULT_MEDIA_BYTES
 from vikingbot.agent.context import ContextBuilder
 from vikingbot.agent.memory import MemoryStore
 from vikingbot.agent.remote_skills import SkillRuntimeContext
@@ -1595,6 +1596,7 @@ class AgentLoop:
 
                 # Stage 3: Process results sequentially in original order
                 turn_tools: list[dict[str, Any]] = []
+                turn_media_bytes = 0
                 for _idx, tool_call, outcome, tool_execute_duration in results:
                     result = outcome.result
                     result_text = str(result)
@@ -1612,8 +1614,26 @@ class AgentLoop:
                                 event_type=OutboundEventType.TOOL_RESULT,
                             )
                         )
+                    model_result = result
+                    if isinstance(result, MultimodalToolResult):
+                        if not self.provider.supports_tool_result_media(self.model):
+                            model_result = (
+                                f"{result_text}\n\nMedia content was omitted because the configured "
+                                "model provider does not support media in tool results."
+                            )
+                        elif (
+                            turn_media_bytes + result.media_bytes
+                            > MAX_INLINE_TOOL_RESULT_MEDIA_BYTES
+                        ):
+                            model_result = (
+                                f"{result_text}\n\nMedia content was omitted because the combined "
+                                "tool results for this model request exceed the inline media "
+                                f"limit of {MAX_INLINE_TOOL_RESULT_MEDIA_BYTES} bytes."
+                            )
+                        else:
+                            turn_media_bytes += result.media_bytes
                     messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
+                        messages, tool_call.id, tool_call.name, model_result
                     )
 
                     tool_used_dict = {

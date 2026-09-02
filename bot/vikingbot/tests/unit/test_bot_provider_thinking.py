@@ -29,6 +29,56 @@ def test_agents_openviking_retention_defaults_to_turn_budget_values():
     assert config.commit_min_raw_tail_steps == 1
 
 
+def test_vlm_adapter_exposes_only_native_tool_result_media_backends():
+    langfuse = SimpleNamespace()
+
+    codex = VLMProviderAdapter(
+        SimpleNamespace(provider="openai-codex"),
+        default_model="gpt-5.3-codex",
+        langfuse_client=langfuse,
+    )
+    anthropic = VLMProviderAdapter(
+        SimpleNamespace(provider="anthropic"),
+        default_model="claude-sonnet",
+        langfuse_client=langfuse,
+    )
+    openai = VLMProviderAdapter(
+        SimpleNamespace(provider="openai"),
+        default_model="gpt-4o",
+        langfuse_client=langfuse,
+    )
+
+    assert codex.supports_tool_result_media() is True
+    assert anthropic.supports_tool_result_media() is True
+    assert openai.supports_tool_result_media() is False
+
+    mixed_failover = VLMProviderAdapter(
+        SimpleNamespace(
+            provider="anthropic",
+            primary=SimpleNamespace(provider="anthropic"),
+            backup=SimpleNamespace(provider="openai"),
+        ),
+        default_model="claude-sonnet",
+        langfuse_client=langfuse,
+    )
+    assert mixed_failover.supports_tool_result_media() is False
+
+
+def test_litellm_provider_exposes_anthropic_tool_result_media_only():
+    langfuse = SimpleNamespace()
+    anthropic = LiteLLMProvider(
+        default_model="claude-sonnet-4-5",
+        langfuse_client=langfuse,
+    )
+    openai = LiteLLMProvider(
+        default_model="gpt-4o",
+        langfuse_client=langfuse,
+    )
+
+    assert anthropic.supports_tool_result_media() is True
+    assert openai.supports_tool_result_media() is False
+
+
 def test_make_provider_passes_default_thinking_to_vlm_adapter(monkeypatch):
     monkeypatch.setitem(
         sys.modules,

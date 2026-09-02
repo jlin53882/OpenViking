@@ -118,7 +118,7 @@ def _convert_message_for_responses(message: Dict[str, Any]) -> List[Dict[str, An
             {
                 "type": "function_call_output",
                 "call_id": str(message.get("tool_call_id", "") or message.get("call_id", "") or ""),
-                "output": _stringify_response_payload(content),
+                "output": _convert_content_for_responses(content),
             }
         ]
     if role == "assistant":
