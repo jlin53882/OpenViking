@@ -11,7 +11,7 @@ from vikingbot.agent.loop import (
     AgentLoop,
     render_budget_reminder,
 )
-from vikingbot.agent.tools.base import Tool, ToolContext
+from vikingbot.agent.tools.base import MultimodalToolResult, Tool, ToolContext
 from vikingbot.agent.tools.compile import (
     CompileScopedTool,
     SubmitTargetCheckoutTool,
@@ -1364,6 +1364,78 @@ async def test_multi_read_hints_on_large_files_and_supports_offset_limit(monkeyp
     )
     assert "window:10:20" in window
     assert fake.calls == [("viking://resources/big.jsonl", 10, 20)]
+
+
+@pytest.mark.asyncio
+async def test_multi_read_returns_images_as_tool_result_content(monkeypatch):
+    image_uri = "viking://resources/example/image.png"
+    image_bytes = b"\x89PNG\r\n\x1a\nimage-data"
+
+    class FakeClient:
+        async def stat(self, uri):
+            assert uri == image_uri
+            return {"size": len(image_bytes), "isDir": False}
+
+        async def download_bytes(self, uri):
+            assert uri == image_uri
+            return image_bytes
+
+        async def read_content(self, *args, **kwargs):
+            raise AssertionError("image reads must not use the text endpoint")
+
+    tool = VikingMultiReadTool()
+
+    async def fake_get_client(ctx):
+        return FakeClient()
+
+    async def no_release(ctx, client):
+        return None
+
+    monkeypatch.setattr(tool, "_get_client", fake_get_client)
+    monkeypatch.setattr(tool, "_release_client", no_release)
+
+    result = await tool.execute(ToolContext(), uris=[image_uri])
+
+    assert isinstance(result, MultimodalToolResult)
+    assert f"START OF {image_uri}" in str(result)
+    assert "Image attached (image/png" in str(result)
+    assert result.content[2] == {
+        "type": "image_url",
+        "image_url": {
+            "url": f"data:image/png;base64,{base64.b64encode(image_bytes).decode('ascii')}"
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extension", ["mp3", "mp4"])
+async def test_multi_read_uses_openviking_overview_for_audio_and_video(monkeypatch, extension):
+    media_uri = f"viking://resources/interview/interview.{extension}"
+
+    class FakeClient:
+        async def read_content(self, uri, level="abstract", **kwargs):
+            assert uri == media_uri
+            assert level == "overview"
+            return "Speaker: hello"
+
+        async def download_bytes(self, uri):
+            raise AssertionError("media reads must not create a second transcription path")
+
+    tool = VikingMultiReadTool()
+
+    async def fake_get_client(ctx):
+        return FakeClient()
+
+    async def no_release(ctx, client):
+        return None
+
+    monkeypatch.setattr(tool, "_get_client", fake_get_client)
+    monkeypatch.setattr(tool, "_release_client", no_release)
+
+    result = await tool.execute(ToolContext(), uris=[media_uri])
+
+    assert isinstance(result, str)
+    assert "Speaker: hello" in result
 
 
 class _RecordingSandbox:

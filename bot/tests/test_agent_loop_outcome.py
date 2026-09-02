@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vikingbot.agent import loop as loop_module
 from vikingbot.agent.context import ContextBuilder
 from vikingbot.agent.loop import AgentLoop
+from vikingbot.agent.tools.base import MultimodalToolResult
+from vikingbot.agent.tools.registry import ToolExecutionResult
 from vikingbot.bus.events import InboundMessage, OutboundEventType
 from vikingbot.bus.queue import MessageBus
 from vikingbot.config.schema import AgentsConfig, Config, SessionKey
@@ -106,6 +108,113 @@ def test_agents_config_enables_subagents_by_default():
 
 def test_agents_config_keeps_ten_recent_openviking_messages_by_default():
     assert AgentsConfig().commit_keep_recent_count == 10
+
+
+def test_context_keeps_multimodal_tool_result_on_tool_message(temp_dir: Path):
+    context = ContextBuilder(workspace=temp_dir / "workspace")
+    content = [
+        {"type": "text", "text": "Source: viking://resources/image.png"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
+        },
+    ]
+    messages = context.add_tool_result(
+        [],
+        "call-1",
+        "openviking_multi_read",
+        MultimodalToolResult(text="Image attached.", content=content),
+    )
+
+    assert messages == [
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "openviking_multi_read",
+            "content": content,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_sends_multimodal_result_but_records_only_text(
+    temp_dir: Path, monkeypatch
+):
+    monkeypatch.setattr(AgentLoop, "_register_builtin_hooks", lambda self: None)
+    monkeypatch.setattr(AgentLoop, "_register_default_tools", lambda self: None)
+    monkeypatch.setattr("vikingbot.agent.loop.SubagentManager", _FakeSubagentManager)
+
+    content = [
+        {"type": "text", "text": "Source: viking://resources/image.png"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
+        },
+    ]
+
+    class Provider(LLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        async def chat(self, messages, tools=None, **kwargs):
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                return LLMResponse(
+                    content=None,
+                    tool_calls=[
+                        ToolCallRequest(
+                            id="call-1",
+                            name="read_image",
+                            arguments={},
+                            tokens=1,
+                        )
+                    ],
+                )
+            return LLMResponse(content="done")
+
+        def get_default_model(self) -> str:
+            return "fake-model"
+
+    class Registry:
+        def get_definitions(self, **kwargs):
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read_image",
+                        "description": "Read an image",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+
+        async def execute_detailed(self, name, params, **kwargs):
+            return ToolExecutionResult(
+                result=MultimodalToolResult(text="Image attached.", content=content),
+                effective_params=params,
+            )
+
+    provider = Provider()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=temp_dir / "workspace",
+        config=Config(storage_workspace=str(temp_dir)),
+        max_iterations=2,
+    )
+
+    final, _reasoning, tools_used, _usage, _iteration = await loop._run_agent_loop(
+        messages=[{"role": "user", "content": "read it"}],
+        session_key=SessionKey(type="cli", channel_id="default", chat_id="multimodal"),
+        publish_events=False,
+        tool_registry=Registry(),
+    )
+
+    assert final == "done"
+    tool_message = next(message for message in provider.calls[1] if message["role"] == "tool")
+    assert tool_message["content"] == content
+    assert tools_used[0]["result"] == "Image attached."
 
 
 def test_agent_loop_omits_spawn_tool_when_subagents_disabled(temp_dir: Path, monkeypatch):

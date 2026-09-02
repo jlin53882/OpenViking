@@ -21,6 +21,7 @@ from vikingbot.agent.remote_skills import SkillRuntimeContext
 from vikingbot.agent.skills import SkillsLoader
 from vikingbot.agent.subagent import SubagentManager
 from vikingbot.agent.tools import register_default_tools
+from vikingbot.agent.tools.base import MultimodalToolResult
 from vikingbot.agent.tools.registry import ToolExecutionResult, ToolRegistry
 from vikingbot.bus.events import InboundMessage, OutboundEventType, OutboundMessage
 from vikingbot.bus.queue import MessageBus
@@ -136,9 +137,9 @@ def _compact_split_chunks(text: str) -> list[str]:
 def _compact_strip_note_header(content: str) -> str:
     text = str(content or "").strip()
     if text.startswith("[Context compaction]"):
-        text = text[len("[Context compaction]"):].strip()
+        text = text[len("[Context compaction]") :].strip()
     if text.startswith("Findings so far:"):
-        text = text[len("Findings so far:"):].strip()
+        text = text[len("Findings so far:") :].strip()
     return text.strip()
 
 
@@ -1596,14 +1597,18 @@ class AgentLoop:
                 turn_tools: list[dict[str, Any]] = []
                 for _idx, tool_call, outcome, tool_execute_duration in results:
                     result = outcome.result
+                    result_text = str(result)
+                    recorded_result = (
+                        result_text if isinstance(result, MultimodalToolResult) else result
+                    )
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info(f"[RESULT]: {str(result)[:600]}")
+                    logger.info(f"[RESULT]: {result_text[:600]}")
 
                     if publish_events:
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 session_key=session_key,
-                                content=str(result),
+                                content=result_text,
                                 event_type=OutboundEventType.TOOL_RESULT,
                             )
                         )
@@ -1616,11 +1621,11 @@ class AgentLoop:
                         "tool_name": tool_call.name,
                         "args": args_str,
                         "resolved_args": outcome.effective_params,
-                        "result": result,
+                        "result": recorded_result,
                         "duration": tool_execute_duration,
                         "execute_success": _is_tool_result_success(result),
                         "input_token": tool_call.tokens,
-                        "output_token": cal_str_tokens(result, text_type="mixed"),
+                        "output_token": cal_str_tokens(result_text, text_type="mixed"),
                     }
                     if outcome.skill_uris:
                         tool_used_dict["skill_uri"] = outcome.skill_uris[0]
