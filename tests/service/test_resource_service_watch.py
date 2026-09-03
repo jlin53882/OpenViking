@@ -838,6 +838,40 @@ async def test_add_resource_processor_records_paused_watch_result(
     )
 
 
+@pytest.mark.asyncio
+async def test_record_watch_execution_redacts_error_in_log(caplog):
+    watch_manager = SimpleNamespace(record_execution=AsyncMock())
+    scheduler = SimpleNamespace(
+        watch_manager=watch_manager,
+        release_execution=AsyncMock(),
+    )
+    service = ResourceService(watch_scheduler=scheduler)
+    error = "connector failed: api_key=secret-watch-key, Authorization: Bearer secret-token"
+
+    resource_service_module.logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level("INFO", logger=resource_service_module.logger.name):
+            await service.record_watch_execution(
+                "watch-1",
+                status="failed",
+                execution_task_id="connector-1",
+                error=error,
+            )
+    finally:
+        resource_service_module.logger.removeHandler(caplog.handler)
+
+    assert "secret-watch-key" not in caplog.text
+    assert "secret-token" not in caplog.text
+    assert "[REDACTED]" in caplog.text
+    watch_manager.record_execution.assert_awaited_once_with(
+        "watch-1",
+        status="failed",
+        execution_task_id="connector-1",
+        error=error,
+    )
+    scheduler.release_execution.assert_awaited_once_with("watch-1")
+
+
 class TestWatchTaskConflict:
     """Tests for watch task conflict detection."""
 

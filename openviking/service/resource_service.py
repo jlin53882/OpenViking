@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from openviking.core.namespace import is_content_root_uri
+from openviking.observability.http_error_context import sanitize_public_http_error
 from openviking.parse.backend import ParserBackend, normalize_parser_backend
 from openviking.parse.mode import ParseMode, normalize_parse_mode
 from openviking.parse.parsers.constants import MPEG_TS_EXTENSION_ALIAS
@@ -241,6 +242,11 @@ class ResourceService:
         error: Optional[str] = None,
     ) -> None:
         """Record a pre-created Watch's first round and release its scheduler hold."""
+        sanitized_error = (
+            sanitize_public_http_error(code="WATCH_EXECUTION_FAILED", message=error).message
+            if error
+            else None
+        )
         try:
             watch_manager = self._get_watch_manager()
             if watch_manager is not None:
@@ -256,7 +262,7 @@ class ResourceService:
                     task_id,
                     status,
                     execution_task_id,
-                    f" error={error}" if error else "",
+                    f" error={sanitized_error}" if sanitized_error else "",
                 )
         finally:
             release = getattr(self._watch_scheduler, "release_execution", None)
