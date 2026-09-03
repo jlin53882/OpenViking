@@ -333,7 +333,15 @@ pub(super) async fn run() {
     };
 
     let output_format = OutputFormat::from(cli.output);
-    let config = match runtime_config(std::env::var(OPENVIKING_API_KEY_ENV).ok()) {
+    let configured_url = match Config::load_required() {
+        Ok(config) => Some(config.url),
+        Err(Error::MissingConfig) => None,
+        Err(error) => {
+            print_compile_error(&command_display, &error, output_format, cli.compact);
+            std::process::exit(2);
+        }
+    };
+    let config = match runtime_config(std::env::var(OPENVIKING_API_KEY_ENV).ok(), configured_url) {
         Ok(config) => config,
         Err(error) => {
             print_compile_error(&command_display, &error, output_format, cli.compact);
@@ -380,6 +388,8 @@ pub(super) async fn run() {
                 wait,
                 timeout,
                 processing_mode,
+                Vec::new(),
+                "replace".to_string(),
                 ctx,
             )
             .await
@@ -399,6 +409,8 @@ pub(super) async fn run() {
                 ignore_case,
                 node_limit,
                 level_limit,
+                Vec::new(),
+                None,
                 ctx,
             )
             .await
@@ -407,7 +419,7 @@ pub(super) async fn run() {
             pattern,
             uri,
             node_limit,
-        } => handlers::handle_glob(pattern, uri, node_limit, ctx).await,
+        } => handlers::handle_glob(pattern, uri, node_limit, false, None, Vec::new(), ctx).await,
         CompileCommand::Ls {
             uri,
             simple,
@@ -415,14 +427,40 @@ pub(super) async fn run() {
             abs_limit,
             all,
             node_limit,
-        } => handlers::handle_ls(uri, simple, recursive, abs_limit, all, node_limit, ctx).await,
+        } => {
+            handlers::handle_ls(
+                uri,
+                simple,
+                recursive,
+                abs_limit,
+                all,
+                node_limit,
+                None,
+                Vec::new(),
+                ctx,
+            )
+            .await
+        }
         CompileCommand::Tree {
             uri,
             abs_limit,
             all,
             node_limit,
             level_limit,
-        } => handlers::handle_tree(uri, abs_limit, all, node_limit, level_limit, ctx).await,
+        } => {
+            handlers::handle_tree(
+                uri,
+                abs_limit,
+                all,
+                node_limit,
+                level_limit,
+                false,
+                None,
+                Vec::new(),
+                ctx,
+            )
+            .await
+        }
         CompileCommand::Find {
             query,
             image,
@@ -520,12 +558,12 @@ fn print_compile_error(command: &str, error: &Error, output_format: OutputFormat
     }
 
     eprintln!("{command}\n\nError [{}]: {message}", error.code());
-    if matches!(error, Error::Config(_)) {
+    if matches!(error, Error::Config(message) if message.contains(OPENVIKING_API_KEY_ENV)) {
         eprintln!("\nSet the key with: export {OPENVIKING_API_KEY_ENV}=\"<your-api-key>\"");
     }
 }
 
-fn runtime_config(api_key: Option<String>) -> Result<Config> {
+fn runtime_config(api_key: Option<String>, service_url: Option<String>) -> Result<Config> {
     let api_key = api_key
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -539,8 +577,24 @@ fn runtime_config(api_key: Option<String>) -> Result<Config> {
         .parse::<reqwest::header::HeaderValue>()
         .map_err(|_| Error::Config(format!("{OPENVIKING_API_KEY_ENV} is not a valid API key")))?;
 
+    let service_url = service_url
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OPENVIKING_COMPILE_URL.to_string());
+    let parsed_url = reqwest::Url::parse(&service_url)
+        .map_err(|_| Error::Config("ovcli.conf contains an invalid URL".to_string()))?;
+    if !matches!(parsed_url.scheme(), "http" | "https")
+        || parsed_url.host_str().is_none()
+        || parsed_url.query().is_some()
+        || parsed_url.fragment().is_some()
+    {
+        return Err(Error::Config(
+            "ovcli.conf URL must be an HTTP(S) base URL without a query or fragment".to_string(),
+        ));
+    }
+
     Ok(Config {
-        url: OPENVIKING_COMPILE_URL.to_string(),
+        url: service_url,
         api_key: None,
         extra_headers: Some(HashMap::from([(
             reqwest::header::AUTHORIZATION.as_str().to_string(),
@@ -624,10 +678,14 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_uses_only_the_fixed_service_and_supplied_key() {
-        let config = runtime_config(Some("  secret  ".to_string())).expect("valid config");
+    fn runtime_config_uses_configured_service_or_default_and_vault_key() {
+        let config = runtime_config(
+            Some("  secret  ".to_string()),
+            Some(" https://stg.example.com/openviking/ ".to_string()),
+        )
+        .expect("valid config");
 
-        assert_eq!(config.url, OPENVIKING_COMPILE_URL);
+        assert_eq!(config.url, "https://stg.example.com/openviking");
         assert!(config.api_key.is_none());
         assert_eq!(
             config
@@ -641,11 +699,15 @@ mod tests {
         assert!(config.account.is_none());
         assert!(config.user.is_none());
         assert!(!config.echo_command);
+
+        let default_config =
+            runtime_config(Some("secret".to_string()), None).expect("valid config");
+        assert_eq!(default_config.url, OPENVIKING_COMPILE_URL);
     }
 
     #[test]
     fn runtime_config_preserves_vault_placeholder_in_bearer_header() {
-        let config = runtime_config(Some("ARK_SECRET_PLACEHOLDER".to_string()))
+        let config = runtime_config(Some("ARK_SECRET_PLACEHOLDER".to_string()), None)
             .expect("Vault placeholder should be accepted");
         let client = crate::base_client::BaseClient::new(
             &config.url,
@@ -671,7 +733,7 @@ mod tests {
     #[test]
     fn runtime_config_requires_a_non_empty_api_key() {
         for value in [None, Some(String::new()), Some("  ".to_string())] {
-            let error = runtime_config(value).expect_err("missing key must fail");
+            let error = runtime_config(value, None).expect_err("missing key must fail");
             assert!(error.to_string().contains(OPENVIKING_API_KEY_ENV));
         }
     }
@@ -679,7 +741,7 @@ mod tests {
     #[test]
     fn runtime_config_rejects_a_key_that_cannot_be_sent_as_an_http_header() {
         let error =
-            runtime_config(Some("bad\nkey".to_string())).expect_err("invalid key must fail");
+            runtime_config(Some("bad\nkey".to_string()), None).expect_err("invalid key must fail");
         assert!(error.to_string().contains(OPENVIKING_API_KEY_ENV));
     }
 }
