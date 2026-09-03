@@ -14,13 +14,13 @@ from openviking.utils.media_processor import UnifiedResourceProcessor
 from openviking_cli.exceptions import InvalidArgumentError
 
 
-def _resource(path: Path, **meta) -> LocalResource:
+def _resource(path: Path, *, is_temporary: bool = False, **meta) -> LocalResource:
     return LocalResource(
         path=path,
         source_type=meta.pop("source_type", SourceType.LOCAL),
         original_source=str(path),
         meta=meta or {"original_filename": path.name},
-        is_temporary=False,
+        is_temporary=is_temporary,
     )
 
 
@@ -51,6 +51,20 @@ async def test_prepare_rejects_an_empty_file(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_prepare_cleans_up_a_temporary_empty_file(monkeypatch, tmp_path):
+    """A rejected accessor result must not escape its cleanup owner."""
+    empty = tmp_path / "downloaded.txt"
+    empty.write_bytes(b"")
+    resource = _resource(empty, source_type=SourceType.HTTP, is_temporary=True)
+    processor = _processor(monkeypatch, resource)
+
+    with pytest.raises(InvalidArgumentError):
+        await processor.prepare("https://example.com/downloaded.txt")
+
+    assert not empty.exists()
+
+
+@pytest.mark.asyncio
 async def test_an_empty_remote_download_is_rejected_too(monkeypatch, tmp_path):
     """A URL whose body turns out to be empty is refused at fetch time."""
     downloaded = tmp_path / "tmp9f3a21"
@@ -75,9 +89,11 @@ async def test_a_one_byte_file_is_still_accepted(monkeypatch, tmp_path):
     """Only zero bytes is refused; this is not a minimum-size policy."""
     tiny = tmp_path / "tiny.txt"
     tiny.write_bytes(b"x")
-    processor = _processor(monkeypatch, _resource(tiny))
+    resource = _resource(tiny, is_temporary=True)
+    processor = _processor(monkeypatch, resource)
 
-    assert await processor.prepare(str(tiny)) is not None
+    assert await processor.prepare(str(tiny)) is resource
+    assert tiny.exists()
 
 
 @pytest.mark.asyncio

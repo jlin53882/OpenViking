@@ -201,8 +201,14 @@ class UnifiedResourceProcessor:
             )
 
         resource = await self._get_accessor_registry().access(source, **kwargs)
-        self._set_resolved_identity(resource, kwargs.get("source_name"))
-        self._reject_empty_resource(resource, kwargs.get("source_name"))
+        try:
+            self._set_resolved_identity(resource, kwargs.get("source_name"))
+            self._reject_empty_resource(resource, kwargs.get("source_name"))
+        except Exception:
+            # Ownership transfers to the caller only after prepare succeeds.
+            # Until then, release temporary accessor results on every error.
+            resource.cleanup()
+            raise
         return resource
 
     @staticmethod

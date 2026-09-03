@@ -62,6 +62,8 @@ class TestTempUploadDeep:
             with open(test_file, "w"):
                 pass
             add_resp = api_client.add_resource(path=test_file, wait=True)
-            assert add_resp.status_code == 200, (
-                f"upload empty file should return 200, got {add_resp.status_code}"
-            )
+            assert add_resp.status_code == 400, add_resp.text
+            data = add_resp.json()
+            assert data["status"] == "error"
+            assert data["error"]["code"] == "INVALID_ARGUMENT"
+            assert "empty" in data["error"]["message"].lower()
