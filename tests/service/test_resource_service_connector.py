@@ -2037,17 +2037,23 @@ async def test_connector_import_without_target_is_rejected(
 
 
 @pytest.mark.asyncio
-async def test_connector_import_rejects_target_outside_public_resources_root(
+async def test_connector_import_rejects_target_outside_resources_tree(
     connector_config,
     ctx,
     service,
 ):
-    with pytest.raises(InvalidArgumentError, match="public resources root"):
+    with pytest.raises(InvalidArgumentError, match="resources tree"):
         await service.add_resource(
             path="tos://bucket/prefix",
             ctx=ctx,
-            to="viking://user/alice/resources/spec",
+            to="viking://user/alice/memories/spec",
         )
+
+
+def test_connector_import_accepts_user_resources_target(connector_config, ctx, service):
+    # Same rule as native imports: a user's own resources tree is a valid target.
+    for to in ("viking://user/alice/resources/spec", "viking://user/alice/resources"):
+        assert service._connector.should_delegate("tos://bucket/prefix", ctx=ctx, to=to)
 
 
 @pytest.mark.asyncio

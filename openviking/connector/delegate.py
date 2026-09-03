@@ -35,6 +35,8 @@ from openviking.connector.routing import (
     detect_connector_add_type,
     is_full_commit_sha,
 )
+from openviking.core.namespace import NamespaceShapeError
+from openviking.core.uri_validation import matches_content_kind
 from openviking.crypto.encryptor import MAGIC as ENCRYPTED_ENVELOPE_MAGIC
 from openviking.parse.mode import ParseMode
 from openviking.resource.processing_mode import (
@@ -92,6 +94,14 @@ def _validate_tos_uri(
         or parsed.fragment
     ):
         raise error
+
+
+def _is_resource_target(to: str) -> bool:
+    """True when *to* lies in a resources tree: the public root or a user's own."""
+    try:
+        return matches_content_kind(to, "resource")
+    except (ValueError, NamespaceShapeError):
+        return False
 
 
 class ConnectorDelegate:
@@ -409,8 +419,11 @@ class ConnectorDelegate:
             unsupported.append("parent targets (Connector imports require an exact 'to' target)")
         if not to:
             unsupported.append("missing exact 'to' target")
-        elif to != "viking://resources" and not to.startswith("viking://resources/"):
-            unsupported.append("to outside the public resources root (viking://resources/...)")
+        elif not _is_resource_target(to):
+            unsupported.append(
+                "to outside a resources tree (viking://resources/... or "
+                "viking://user/<user_id>/resources/...)"
+            )
         if instruction:
             unsupported.append("instruction")
         if not build_index:
