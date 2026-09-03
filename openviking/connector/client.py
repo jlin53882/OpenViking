@@ -96,6 +96,17 @@ class ConnectorClient:
             # Authentication belongs exclusively in the Authorization header.
             payload.update({key: value for key, value in extra_params.items() if key != "api_key"})
 
+        # Log shape only: param_config values and auth_config may carry source credentials.
+        logger.info(
+            "[ConnectorClient] doc/add: add_type=%s to=%s include_child=%s param_config_keys=%s "
+            "has_auth_config=%s has_stream_states=%s",
+            add_type,
+            to,
+            include_child,
+            sorted(param_config or {}),
+            bool(auth_config),
+            stream_states is not None,
+        )
         async with httpx.AsyncClient(timeout=30.0) as client:
             rsp = await client.post(
                 self._doc_add_url,

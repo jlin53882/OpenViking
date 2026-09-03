@@ -475,10 +475,13 @@ class WatchScheduler:
         Used while an import's first round runs so a due tick does not start an
         overlapping run; release with :meth:`release_execution`.
         """
-        return await self._try_mark_executing(task_id)
+        held = await self._try_mark_executing(task_id)
+        logger.debug(f"[WatchScheduler] hold_execution task_id={task_id} held={held}")
+        return held
 
     async def release_execution(self, task_id: str) -> None:
         await self._discard_executing(task_id)
+        logger.debug(f"[WatchScheduler] release_execution task_id={task_id}")
 
     async def _try_mark_executing(self, task_id: str) -> bool:
         async with self._lock:

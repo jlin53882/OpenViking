@@ -646,6 +646,19 @@ class ConnectorDelegate:
                 raise InternalError(
                     f"Connector accepted the import but returned no task key: {result}"
                 )
+            # Never log api_key / auth_config / param_config values here.
+            logger.info(
+                "[ConnectorDelegate] Connector import accepted: add_type=%s to=%s "
+                "ov_task_id=%s connector_task_key=%s account_id=%s has_auth_config=%s "
+                "incremental=%s",
+                add_type,
+                task_resource_id,
+                task.task_id,
+                connector_task_key,
+                ctx.account_id,
+                bool(auth_config),
+                connector_states is not None,
+            )
         except asyncio.CancelledError:
             await task_tracker.fail(
                 task.task_id,
@@ -655,6 +668,15 @@ class ConnectorDelegate:
             )
             raise
         except Exception as exc:
+            logger.error(
+                "[ConnectorDelegate] Connector submission failed: add_type=%s to=%s "
+                "ov_task_id=%s error_type=%s error=%s",
+                add_type,
+                task_resource_id,
+                task.task_id,
+                type(exc).__name__,
+                exc,
+            )
             await task_tracker.fail(
                 task.task_id,
                 str(exc),
@@ -740,8 +762,10 @@ class ConnectorDelegate:
         )
 
         poll_interval = poll_interval_ms / 1000.0
-        deadline = time.perf_counter() + timeout_seconds
+        started = time.perf_counter()
+        deadline = started + timeout_seconds
         terminal_statuses = {"succeeded", "failed", "cancelled"}
+        last_status = ""
 
         try:
             while time.perf_counter() < deadline:
@@ -764,6 +788,15 @@ class ConnectorDelegate:
                     )
                     continue
                 status = (info.get("Status") or info.get("status") or "").lower()
+                if status != last_status:
+                    logger.info(
+                        "[ConnectorDelegate] Connector task %s: %s -> %s (ov_task_id=%s)",
+                        connector_task_key,
+                        last_status or "submitted",
+                        status,
+                        ov_task_id,
+                    )
+                    last_status = status
 
                 await task_tracker.update_stage(
                     ov_task_id,
@@ -801,6 +834,14 @@ class ConnectorDelegate:
                             for key in ("memory_linking", "warnings"):
                                 if key in link_result:
                                     completion[key] = link_result[key]
+                        logger.info(
+                            "[ConnectorDelegate] Connector task %s succeeded after %.0fs "
+                            "(ov_task_id=%s, has_states=%s)",
+                            connector_task_key,
+                            time.perf_counter() - started,
+                            ov_task_id,
+                            connector_states is not None,
+                        )
                         await task_tracker.complete(
                             ov_task_id,
                             completion,
@@ -810,6 +851,15 @@ class ConnectorDelegate:
                         return {"status": "completed", **completion}
                     error_msg = info.get("ErrorMessage") or info.get("error_message") or status
                     failure = f"connector task {status}: {error_msg}"
+                    logger.warning(
+                        "[ConnectorDelegate] Connector task %s ended %s after %.0fs "
+                        "(ov_task_id=%s): %s",
+                        connector_task_key,
+                        status,
+                        time.perf_counter() - started,
+                        ov_task_id,
+                        error_msg,
+                    )
                     await task_tracker.fail(
                         ov_task_id,
                         failure,
@@ -819,6 +869,14 @@ class ConnectorDelegate:
                     return {"status": "failed", "error": failure}
 
             timeout_msg = f"connector task timed out after {timeout_seconds}s"
+            logger.warning(
+                "[ConnectorDelegate] Connector task %s timed out after %ss (ov_task_id=%s, "
+                "last_status=%s)",
+                connector_task_key,
+                timeout_seconds,
+                ov_task_id,
+                last_status or "submitted",
+            )
             await task_tracker.fail(
                 ov_task_id,
                 timeout_msg,

@@ -250,6 +250,14 @@ class ResourceService:
                     execution_task_id=execution_task_id,
                     error=error,
                 )
+                logger.info(
+                    "[ResourceService] Watch first round recorded: watch_task_id=%s status=%s "
+                    "execution_task_id=%s%s",
+                    task_id,
+                    status,
+                    execution_task_id,
+                    f" error={error}" if error else "",
+                )
         finally:
             release = getattr(self._watch_scheduler, "release_execution", None)
             if release is not None:
@@ -1532,6 +1540,14 @@ class ResourceService:
                     raise InternalError("Failed to create Connector watch task.")
                 watch_task_id = watch.task_id
                 await self._hold_watch_execution(watch_task_id)
+                logger.info(
+                    "[ResourceService] Connector watch ready before import: watch_task_id=%s "
+                    "to=%s add_type=%s is_active=%s",
+                    watch_task_id,
+                    target_to,
+                    resolved[0],
+                    watch.is_active,
+                )
 
                 async def record_first_run(
                     status: str,
@@ -1644,6 +1660,13 @@ class ResourceService:
             if feishu_watch is None:
                 raise InternalError("Failed to create native Feishu watch task.")
             await self._hold_watch_execution(feishu_watch.task_id)
+            logger.info(
+                "[ResourceService] Native Feishu watch ready before import: watch_task_id=%s "
+                "to=%s is_active=%s",
+                feishu_watch.task_id,
+                target_to,
+                feishu_watch.is_active,
+            )
 
         try:
             if enforce_public_remote_targets and is_remote_resource_source(path):
