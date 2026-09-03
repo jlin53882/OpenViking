@@ -1925,6 +1925,7 @@ async def test_add_resource_falls_back_for_shared_source_with_parent(
         "status": "success",
         "task_id": "task-standard",
         "root_uri": "viking://resources/repo/repo",
+        "source_path": "https://git.example/org/repo.git",
     }
     service._connector.submit.assert_not_awaited()
     service._enqueue_add_resource_job.assert_awaited_once()
