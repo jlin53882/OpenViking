@@ -69,16 +69,14 @@ def test_feishu_auth_state_refresh_window():
         ("https://open.larksuite.com", "https://accounts.larksuite.com/oauth/v3/token"),
     ],
 )
-def test_refresh_user_token_uses_oauth_v3_and_rotates_refresh_token(
-    monkeypatch, domain, token_url
-):
+def test_refresh_user_token_uses_oauth_v3_and_rotates_refresh_token(monkeypatch, domain, token_url):
     def fake_post(url, *, data, timeout):
         assert url == token_url
         assert data == {
             "grant_type": "refresh_token",
             "client_id": "cli-test",
             "client_secret": "secret-test",
-            "refresh_token": "r-old",
+            "refresh_token": "header.payload.signature",
         }
         assert timeout == 12
         return httpx.Response(
@@ -103,13 +101,47 @@ def test_refresh_user_token_uses_oauth_v3_and_rotates_refresh_token(
     legacy_client.authen.v1.refresh_access_token.create.side_effect = AssertionError(
         "legacy authen/v1 refresh endpoint must not be used"
     )
-    monkeypatch.setattr(client, "_get_client", lambda: legacy_client)
+    monkeypatch.setattr(client, "_get_client", lambda: legacy_client, raising=False)
 
-    refreshed = client._refresh_user_access_token_sync("r-old")
+    refreshed = client._refresh_user_access_token_sync("header.payload.signature")
 
     assert refreshed == FeishuRefreshedToken(
         access_token="u-new",
         refresh_token="r-new",
+        expires_in=7200,
+    )
+
+
+def test_refresh_user_token_keeps_legacy_endpoint_for_ur_tokens(monkeypatch):
+    response = MagicMock()
+    response.success.return_value = True
+    response.data.access_token = "u-new"
+    response.data.refresh_token = "ur-new"
+    response.data.expires_in = 7200
+    legacy_client = MagicMock()
+    legacy_client.authen.v1.refresh_access_token.create.return_value = response
+
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        MagicMock(side_effect=AssertionError("legacy tokens must not use OAuth v3")),
+    )
+    client = FeishuOAuthClient(
+        FeishuAppCredentials(
+            app_id="cli-test",
+            app_secret="secret-test",
+            domain="https://open.feishu.cn",
+            request_timeout=12,
+        )
+    )
+    monkeypatch.setattr(client, "_get_client", lambda: legacy_client, raising=False)
+
+    refreshed = client._refresh_user_access_token_sync("ur-old")
+
+    legacy_client.authen.v1.refresh_access_token.create.assert_called_once()
+    assert refreshed == FeishuRefreshedToken(
+        access_token="u-new",
+        refresh_token="ur-new",
         expires_in=7200,
     )
 
