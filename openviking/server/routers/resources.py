@@ -76,13 +76,13 @@ class AddResourceRequest(BaseModel):
 
             Note: Re-adding the same source to the same target updates its active watch task.
             A different source targeting an active watch raises ConflictError; cancel that
-            watch first with watch_interval <= 0. For Connector imports this check is
-            eventually consistent: the Watch is created only after the background import
-            succeeds, so overlapping imports may both write before Watch finalization
-            reports the conflict.
+            watch first with watch_interval <= 0. Connector and native Feishu imports create
+            the Watch before the import runs, so it is visible immediately and the conflict
+            is reported at submission; the scheduler does not run it until the first round
+            has recorded its result.
         is_active: Initial Watch state for Connector and native Feishu imports. When false,
-            requires watch_interval > 0 and an explicit to target; the inactive Watch is
-            visible immediately while the initial import continues in the background.
+            requires watch_interval > 0 and an explicit to target and creates the Watch
+            paused; it stays paused until updated, regardless of the import result.
     """
 
     model_config = ConfigDict(extra="forbid")

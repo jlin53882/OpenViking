@@ -178,9 +178,11 @@ class WatchScheduler:
                     next_time = await self._watch_manager.get_next_execution_time()
                     if next_time is not None:
                         now = datetime.now()
+                        # Floor at 1s: a due task that is still executing (or held by
+                        # an in-flight first round) would otherwise spin this loop.
                         sleep_seconds = min(
                             self._check_interval,
-                            max(0.0, (next_time - now).total_seconds()),
+                            max(1.0, (next_time - now).total_seconds()),
                         )
                 await asyncio.sleep(sleep_seconds)
             except asyncio.CancelledError:
@@ -466,6 +468,17 @@ class WatchScheduler:
                     f"[WatchScheduler] Failed to update task {task.task_id}: {e}",
                     exc_info=True,
                 )
+
+    async def hold_execution(self, task_id: str) -> bool:
+        """Mark *task_id* as executing outside the scheduler.
+
+        Used while an import's first round runs so a due tick does not start an
+        overlapping run; release with :meth:`release_execution`.
+        """
+        return await self._try_mark_executing(task_id)
+
+    async def release_execution(self, task_id: str) -> None:
+        await self._discard_executing(task_id)
 
     async def _try_mark_executing(self, task_id: str) -> bool:
         async with self._lock:

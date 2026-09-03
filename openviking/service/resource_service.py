@@ -226,6 +226,35 @@ class ResourceService:
             return None
         return self._watch_scheduler.watch_manager
 
+    async def _hold_watch_execution(self, task_id: str) -> None:
+        """Keep the scheduler from running *task_id* while its first round is in flight."""
+        hold = getattr(self._watch_scheduler, "hold_execution", None)
+        if hold is not None:
+            await hold(task_id)
+
+    async def record_watch_execution(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        execution_task_id: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Record a pre-created Watch's first round and release its scheduler hold."""
+        try:
+            watch_manager = self._get_watch_manager()
+            if watch_manager is not None:
+                await watch_manager.record_execution(
+                    task_id,
+                    status=status,
+                    execution_task_id=execution_task_id,
+                    error=error,
+                )
+        finally:
+            release = getattr(self._watch_scheduler, "release_execution", None)
+            if release is not None:
+                await release(task_id)
+
     def _sanitize_watch_processor_kwargs(self, processor_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         sanitized: Dict[str, Any] = {}
         for key, value in processor_kwargs.items():
@@ -1338,10 +1367,11 @@ class ResourceService:
                 Note: Re-adding the same source to the same target updates its active watch
                 task in place. A different source targeting an active watch raises
                 ConflictError; cancel that watch first with watch_interval <= 0. Connector
-                imports create the Watch only after the background import succeeds, so this
-                conflict may be reported after both overlapping imports have written data.
-            is_active: When false, create a paused Connector or native Feishu Watch
-                immediately. Requires watch_interval > 0 and an explicit to target.
+                and native Feishu imports create the Watch before the import runs, so the
+                conflict is reported at submission and the Watch is visible at once; the
+                scheduler holds it until the first round records its result.
+            is_active: When false, the Connector or native Feishu Watch is created paused.
+                Requires watch_interval > 0 and an explicit to target.
             enforce_public_remote_targets: When True, reject non-public remote hosts and
                 validate each outbound HTTP request URL during fetch.
             args: Parser/accessor-specific options forwarded to the processing chain.
@@ -1454,18 +1484,8 @@ class ResourceService:
                 raise InvalidArgumentError(f"'{path}' does not match any Connector source type.")
             watch_manager = self._get_watch_manager()
             watch_auth_state = None
-            defer_watch_creation = bool(watch_manager and manage_watch and watch_interval > 0)
-            if defer_watch_creation and watch_manager:
-                if is_active is not False:
-                    # Active watches finalize after import success, so this is only a
-                    # best-effort conflict check before Connector writes data.
-                    await watch_manager.get_upsertable_task_by_uri(
-                        path=path,
-                        to_uri=target_to,
-                        account_id=ctx.account_id,
-                        user_id=ctx.user.user_id,
-                        role=str(ctx.role),
-                    )
+            create_watch = bool(watch_manager and manage_watch and watch_interval > 0)
+            if create_watch:
                 watch_auth_state = await connector.create_watch_auth_state(
                     api_key=ctx.api_key or "",
                     account_id=ctx.account_id,
@@ -1486,81 +1506,61 @@ class ResourceService:
             on_complete: Optional[
                 Callable[[str, Optional[str], Optional[str]], Awaitable[None]]
             ] = None
-            paused_watch = None
-            if defer_watch_creation:
-                if is_active is False:
-                    paused_watch = await self._handle_watch_task_creation(
-                        path=path,
-                        to_uri=target_to,
-                        to_is_directory=to_is_directory,
-                        parent_uri=target_parent,
-                        reason=reason,
-                        instruction=instruction,
-                        watch_interval=watch_interval,
-                        build_index=build_index,
-                        summarize=summarize,
-                        processing_mode=processing_mode,
-                        processor_kwargs=connector_watch_processor_kwargs,
-                        auth_state=watch_auth_state,
-                        connector_states=None,
-                        source_type=resolved[0],
-                        ctx=ctx,
-                        is_active=False,
-                    )
-                    if paused_watch is None:
-                        raise InternalError("Failed to create paused Connector watch task.")
+            if create_watch:
+                # The Watch exists before the import runs so it is visible at once.
+                # A scheduler hold keeps the first round from overlapping with a
+                # scheduled run; record_watch_execution releases it at the end.
+                watch = await self._handle_watch_task_creation(
+                    path=path,
+                    to_uri=target_to,
+                    to_is_directory=to_is_directory,
+                    parent_uri=target_parent,
+                    reason=reason,
+                    instruction=instruction,
+                    watch_interval=watch_interval,
+                    build_index=build_index,
+                    summarize=summarize,
+                    processing_mode=processing_mode,
+                    processor_kwargs=connector_watch_processor_kwargs,
+                    auth_state=watch_auth_state,
+                    connector_states=None,
+                    source_type=resolved[0],
+                    ctx=ctx,
+                    is_active=is_active is not False,
+                )
+                if watch is None:
+                    raise InternalError("Failed to create Connector watch task.")
+                watch_task_id = watch.task_id
+                await self._hold_watch_execution(watch_task_id)
 
-                    async def record_paused_watch_completion(
-                        status: str,
-                        execution_task_id: Optional[str],
-                        error: Optional[str],
-                    ) -> None:
-                        try:
-                            await watch_manager.record_execution(
-                                paused_watch.task_id,
-                                status=status,
-                                execution_task_id=execution_task_id,
-                                error=error,
-                            )
-                        except Exception:
-                            logger.exception(
-                                "[ResourceService] Failed to record paused Connector watch result"
-                            )
+                async def record_first_run(
+                    status: str,
+                    execution_task_id: Optional[str],
+                    error: Optional[str],
+                ) -> None:
+                    try:
+                        await self.record_watch_execution(
+                            watch_task_id,
+                            status=status,
+                            execution_task_id=execution_task_id,
+                            error=error,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "[ResourceService] Failed to record Connector watch result"
+                        )
 
-                    on_complete = record_paused_watch_completion
-
-                async def create_watch_after_success(
+                async def store_connector_states(
                     new_connector_states: Optional[Dict[str, Any]] = None,
                 ) -> None:
-                    if paused_watch is not None:
-                        if new_connector_states is not None:
-                            await watch_manager.update_connector_states(
-                                paused_watch.task_id,
-                                new_connector_states,
-                            )
-                        return
-                    await self._manage_watch_if_needed(
-                        watch_manager=watch_manager,
-                        manage_watch=True,
-                        watch_interval=watch_interval,
-                        to=target_to,
-                        parent=target_parent,
-                        to_is_directory=to_is_directory,
-                        root_uri=target_to,
-                        path=path,
-                        reason=reason,
-                        instruction=instruction,
-                        build_index=build_index,
-                        summarize=summarize,
-                        processing_mode=processing_mode,
-                        processor_kwargs=connector_watch_processor_kwargs,
-                        watch_auth_state=watch_auth_state,
-                        ctx=ctx,
-                        source_type=resolved[0],
-                        connector_states=new_connector_states,
-                    )
+                    if new_connector_states is not None:
+                        await watch_manager.update_connector_states(
+                            watch_task_id,
+                            new_connector_states,
+                        )
 
-                on_success = create_watch_after_success
+                on_complete = record_first_run
+                on_success = store_connector_states
             try:
                 result = await connector.submit(
                     path=path,
@@ -1581,7 +1581,7 @@ class ResourceService:
                 if on_complete is not None:
                     await on_complete("failed", None, str(exc))
                 raise
-            if not defer_watch_creation:
+            if not create_watch:
                 await self._manage_watch_if_needed(
                     watch_manager=watch_manager,
                     manage_watch=manage_watch,
@@ -1605,14 +1605,23 @@ class ResourceService:
 
         from openviking.parse.accessors.feishu_accessor import FeishuAccessor
 
-        paused_feishu_watch = None
+        feishu_watch = None
         watch_manager = self._get_watch_manager()
-        if is_active is False:
-            if not FeishuAccessor._is_feishu_url(path):
-                raise InvalidArgumentError(
-                    "is_active=false is only supported for Connector or native Feishu imports."
-                )
-            paused_feishu_watch = await self._handle_watch_task_creation(
+        if is_active is False and not FeishuAccessor._is_feishu_url(path):
+            raise InvalidArgumentError(
+                "is_active=false is only supported for Connector or native Feishu imports."
+            )
+        if (
+            watch_manager is not None
+            and manage_watch
+            and watch_interval > 0
+            and target_to
+            and FeishuAccessor._is_feishu_url(path)
+        ):
+            # Native Feishu Watches are created before the source job runs so they
+            # are visible at once; the queue processor records the first round and
+            # releases the scheduler hold through record_watch_execution.
+            feishu_watch = await self._handle_watch_task_creation(
                 path=path,
                 to_uri=target_to,
                 to_is_directory=to_is_directory,
@@ -1630,10 +1639,11 @@ class ResourceService:
                 connector_states=None,
                 source_type="feishu",
                 ctx=ctx,
-                is_active=False,
+                is_active=is_active is not False,
             )
-            if paused_feishu_watch is None:
-                raise InternalError("Failed to create paused native Feishu watch task.")
+            if feishu_watch is None:
+                raise InternalError("Failed to create native Feishu watch task.")
+            await self._hold_watch_execution(feishu_watch.task_id)
 
         try:
             if enforce_public_remote_targets and is_remote_resource_source(path):
@@ -1663,7 +1673,7 @@ class ResourceService:
                     processing_mode=processing_mode,
                     mode=mode,
                     watch_interval=watch_interval,
-                    manage_watch=manage_watch and paused_feishu_watch is None,
+                    manage_watch=manage_watch and feishu_watch is None,
                     tags=tags,
                     tag_mode=tag_mode,
                     to_is_directory=to_is_directory,
@@ -1671,12 +1681,10 @@ class ResourceService:
                     enforce_public_remote_targets=enforce_public_remote_targets,
                     processor_kwargs=kwargs,
                     internal_task=internal_task,
-                    watch_task_id=(
-                        paused_feishu_watch.task_id if paused_feishu_watch is not None else None
-                    ),
+                    watch_task_id=feishu_watch.task_id if feishu_watch is not None else None,
                 )
             else:
-                if paused_feishu_watch is not None:
+                if feishu_watch is not None:
                     raise InternalError("Native Feishu import did not produce a durable source job.")
                 result = await self._execute_resource_ingestion(
                     path=path,
@@ -1703,16 +1711,16 @@ class ResourceService:
                     **kwargs,
                 )
         except Exception as exc:
-            if paused_feishu_watch is not None and watch_manager is not None:
+            if feishu_watch is not None:
                 try:
-                    await watch_manager.record_execution(
-                        paused_feishu_watch.task_id,
+                    await self.record_watch_execution(
+                        feishu_watch.task_id,
                         status="failed",
                         error=str(exc) or type(exc).__name__,
                     )
                 except Exception:
                     logger.exception(
-                        "[ResourceService] Failed to record paused native Feishu Watch result"
+                        "[ResourceService] Failed to record native Feishu Watch result"
                     )
             raise
         get_current_telemetry().set("resource.flags.wait", wait)

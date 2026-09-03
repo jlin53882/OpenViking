@@ -91,14 +91,12 @@ class AddResourceProcessor(DequeueHandlerBase):
         if not msg.watch_task_id:
             return
         try:
-            watch_manager = self._resource_service._get_watch_manager()
-            if watch_manager is not None:
-                await watch_manager.record_execution(
-                    msg.watch_task_id,
-                    status=status,
-                    execution_task_id=msg.task_id,
-                    error=error,
-                )
+            await self._resource_service.record_watch_execution(
+                msg.watch_task_id,
+                status=status,
+                execution_task_id=msg.task_id,
+                error=error,
+            )
         except Exception:
             logger.exception("[AddResource] Failed to record initial Watch execution")
 

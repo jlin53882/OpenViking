@@ -21,6 +21,42 @@ class TestWatchSchedulerValidation:
             WatchScheduler(resource_service=rs, max_concurrency=0)
 
 
+class TestWatchSchedulerExecutionHold:
+    @pytest.mark.asyncio
+    async def test_held_due_task_is_skipped_until_released(self):
+        from datetime import datetime, timedelta
+
+        class FakeResourceService(ResourceService):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+
+            async def refresh_resource(self, **kwargs):
+                self.calls.append(kwargs)
+                return {"root_uri": kwargs.get("to")}
+
+        resource_service = FakeResourceService()
+        scheduler = WatchScheduler(resource_service=resource_service, check_interval=1)
+        manager = WatchManager(viking_fs=None)
+        await manager.initialize()
+        scheduler._watch_manager = manager
+        task = await manager.create_task(
+            path="https://example.com/doc",
+            to_uri="viking://resources/doc",
+            watch_interval=5,
+        )
+        task.next_execution_time = datetime.now() - timedelta(minutes=1)
+
+        assert await scheduler.hold_execution(task.task_id) is True
+        await scheduler._check_and_execute_due_tasks()
+        assert resource_service.calls == []
+
+        await scheduler.release_execution(task.task_id)
+        await scheduler._check_and_execute_due_tasks()
+        assert len(resource_service.calls) == 1
+        assert scheduler._executing_tasks == set()
+
+
 class TestWatchSchedulerResourceExistence:
     def test_url_like_sources_are_treated_as_existing(self):
         rs = ResourceService()

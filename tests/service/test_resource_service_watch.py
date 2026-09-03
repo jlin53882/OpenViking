@@ -131,6 +131,8 @@ async def resource_service(watch_manager: WatchManager) -> AsyncGenerator[Resour
     """Create ResourceService instance with watch support."""
     scheduler = MagicMock()
     scheduler.watch_manager = watch_manager
+    scheduler.hold_execution = AsyncMock(return_value=True)
+    scheduler.release_execution = AsyncMock()
     service = ResourceService(
         vikingdb=MockVikingDB(),
         viking_fs=MockVikingFS(),
@@ -589,6 +591,55 @@ class TestAddResourceArgs:
         assert len(resource_service._resource_processor.calls) == 1
 
     @pytest.mark.asyncio
+    async def test_active_native_feishu_watch_is_created_before_queue_processing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        resource_service: ResourceService,
+        request_context: RequestContext,
+    ):
+        to_uri = "viking://resources/active_feishu"
+        resource_service._plan_source_job_target = AsyncMock(return_value=(to_uri, None, False))
+
+        async def preflight(_self, _source, *, feishu_access_token=None):
+            return SimpleNamespace(source_name="Active Feishu", source_format="file")
+
+        monkeypatch.setattr(
+            "openviking.parse.accessors.feishu_accessor.FeishuAccessor.preflight_source",
+            preflight,
+        )
+
+        result = await resource_service.add_resource(
+            path="https://example.feishu.cn/docx/doc_token",
+            ctx=request_context,
+            to=to_uri,
+            watch_interval=30,
+        )
+
+        task = await get_task_by_uri(resource_service, to_uri, request_context)
+        assert task is not None
+        assert task.is_active is True
+        assert task.next_execution_time is not None
+        assert task.last_status is None
+        assert result["task_id"] == "test-task"
+
+        message = resource_service._enqueue_add_resource_job.await_args.args[0]
+        assert message.watch_task_id == task.task_id
+        assert message.skip_watch_management is True
+
+        await resource_service.execute_add_resource_job(
+            message,
+            ctx=request_context,
+            resource_lock=None,
+            stage_callback=AsyncMock(),
+        )
+
+        updated = await get_task_by_uri(resource_service, to_uri, request_context)
+        assert updated is not None
+        assert updated.task_id == task.task_id
+        assert updated.is_active is True
+        assert len(resource_service._resource_processor.calls) == 1
+
+    @pytest.mark.asyncio
     async def test_paused_native_feishu_watch_keeps_preflight_failure(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -753,12 +804,11 @@ async def test_add_resource_processor_records_paused_watch_result(
         "openviking.storage.queuefs.add_resource_processor.get_task_tracker",
         Mock(return_value=task_tracker),
     )
-    watch_manager = SimpleNamespace(record_execution=AsyncMock())
     execute = AsyncMock(side_effect=error) if error else AsyncMock(return_value=result)
     service = SimpleNamespace(
         execute_add_resource_job=execute,
         _link_resource_reason_memory=AsyncMock(),
-        _get_watch_manager=Mock(return_value=watch_manager),
+        record_watch_execution=AsyncMock(),
     )
     processor = AddResourceProcessor(
         service,
@@ -780,7 +830,7 @@ async def test_add_resource_processor_records_paused_watch_result(
     data[TASK_WORK_ID_FIELD] = "work-1"
     await processor._process(message, data)
 
-    watch_manager.record_execution.assert_awaited_once_with(
+    service.record_watch_execution.assert_awaited_once_with(
         "watch-1",
         status=expected_status,
         execution_task_id="add-resource-1",

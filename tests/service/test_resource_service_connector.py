@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -228,19 +229,6 @@ async def test_connector_watch_stores_only_encrypted_replay_state(
         args={"tos_prefix": ["tos://bucket/docs/"]},
     )
 
-    assert (
-        await watch_manager.get_task_by_uri(
-            "viking://resources/x/y",
-            account_id="acct",
-            user_id="alice",
-            role=str(Role.USER),
-        )
-        is None
-    )
-    background_tasks = list(service._background_tasks)
-    release_monitor.set()
-    await asyncio.gather(*background_tasks)
-
     task = await watch_manager.get_task_by_uri(
         "viking://resources/x/y",
         account_id="acct",
@@ -248,6 +236,14 @@ async def test_connector_watch_stores_only_encrypted_replay_state(
         role=str(Role.USER),
     )
     assert task is not None
+    assert task.is_active is True
+    assert task.last_status is None
+    background_tasks = list(service._background_tasks)
+    release_monitor.set()
+    await asyncio.gather(*background_tasks)
+
+    assert task.last_status == "completed"
+    assert task.last_task_id == "task-1"
     assert task.source_type == "tos"
     assert task.auth_state["provider"] == "connector_encrypted"
     assert "secret" not in json.dumps(task.auth_state)
@@ -470,16 +466,19 @@ async def test_connector_watch_prechecks_only_active_conflicts(
         watch_interval=5,
     )
 
-    assert existing.is_active is False
-    assert existing.path == "tos://bucket/old/"
+    # A paused watch on the same target is reactivated at submission, not after
+    # the import finishes.
+    assert existing.is_active is True
+    assert existing.path == "tos://bucket/new/"
+    assert existing.last_status is None
     release_monitor.set()
     await asyncio.gather(*list(service._background_tasks))
     assert existing.is_active is True
-    assert existing.path == "tos://bucket/new/"
+    assert existing.last_status == "completed"
 
 
 @pytest.mark.asyncio
-async def test_connector_watch_resolves_overlapping_imports_at_finalize(
+async def test_connector_watch_rejects_overlapping_imports_at_submit(
     connector_config,
     ctx,
 ):
@@ -494,13 +493,7 @@ async def test_connector_watch_resolves_overlapping_imports_at_finalize(
         skill_processor=object(),
         watch_scheduler=SimpleNamespace(watch_manager=watch_manager),
     )
-    finalizers = []
-
-    async def submit(**kwargs):
-        finalizers.append(kwargs["on_success"])
-        return {"status": "accepted"}
-
-    service._connector.submit = AsyncMock(side_effect=submit)
+    service._connector.submit = AsyncMock(return_value={"status": "accepted"})
     to_uri = "viking://resources/x/y"
 
     await service.add_resource(
@@ -509,18 +502,16 @@ async def test_connector_watch_resolves_overlapping_imports_at_finalize(
         to=to_uri,
         watch_interval=5,
     )
-    await service.add_resource(
-        path="tos://bucket/second/",
-        ctx=ctx,
-        to=to_uri,
-        watch_interval=5,
-    )
-
-    assert service._connector.submit.await_count == 2
-    await finalizers[0]()
     with pytest.raises(ConflictError, match="already being monitored"):
-        await finalizers[1]()
+        await service.add_resource(
+            path="tos://bucket/second/",
+            ctx=ctx,
+            to=to_uri,
+            watch_interval=5,
+        )
 
+    # The second import never reaches the Connector, so nothing overlapping is written.
+    assert service._connector.submit.await_count == 1
     task = await watch_manager.get_task_by_uri(
         to_uri,
         account_id="acct",
@@ -529,6 +520,79 @@ async def test_connector_watch_resolves_overlapping_imports_at_finalize(
     )
     assert task is not None
     assert task.path == "tos://bucket/first/"
+
+
+@pytest.mark.asyncio
+async def test_active_connector_watch_is_visible_and_held_until_first_round_ends(
+    monkeypatch,
+    connector_config,
+    ctx,
+):
+    tracker = _task_tracker()
+    release_import = asyncio.Event()
+
+    async def get_task_info(_task_key, _api_key):
+        await release_import.wait()
+        return {"Status": "succeeded", "StreamStates": {"documents": {"cursor": {"p": 1}}}}
+
+    connector_client = SimpleNamespace(
+        submit_doc_add=AsyncMock(return_value={"task_key": "connector-1"}),
+        get_task_info=AsyncMock(side_effect=get_task_info),
+    )
+    _install_connector_dependencies(
+        monkeypatch,
+        tracker,
+        connector_client,
+        discard_monitor=False,
+    )
+    service = ResourceService(
+        vikingdb=object(),
+        viking_fs=SimpleNamespace(
+            exists=AsyncMock(return_value=True),
+            _encryptor=_FakeEncryptor(),
+        ),
+        resource_processor=object(),
+        skill_processor=object(),
+    )
+    service.refresh_resource = AsyncMock(return_value={"status": "completed"})
+    scheduler = WatchScheduler(resource_service=service, check_interval=1)
+    watch_manager = WatchManager()
+    scheduler._watch_manager = watch_manager
+    service._watch_scheduler = scheduler
+    to_uri = "viking://resources/x/y"
+
+    result = await service.add_resource(
+        path="tos://bucket/docs/",
+        ctx=ctx,
+        to=to_uri,
+        watch_interval=5,
+    )
+
+    task = await watch_manager.get_task_by_uri(
+        to_uri,
+        account_id="acct",
+        user_id="alice",
+        role=str(Role.USER),
+    )
+    assert task is not None
+    assert task.is_active is True
+    assert task.next_execution_time is not None
+    assert task.last_status is None
+    assert scheduler._executing_tasks == {task.task_id}
+
+    # Even when the watch falls due during the first round, the scheduler skips it.
+    task.next_execution_time = datetime.now() - timedelta(minutes=1)
+    await scheduler._check_and_execute_due_tasks()
+    service.refresh_resource.assert_not_awaited()
+
+    release_import.set()
+    await asyncio.gather(*list(service._background_tasks))
+
+    assert scheduler._executing_tasks == set()
+    assert task.last_task_id == result["task_id"]
+    assert task.last_status == "completed"
+    assert task.connector_states == {"documents": {"cursor": {"p": 1}}}
+    assert task.next_execution_time > task.last_execution_time
 
 
 @pytest.mark.asyncio
