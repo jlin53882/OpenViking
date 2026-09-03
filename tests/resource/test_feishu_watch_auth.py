@@ -3,6 +3,10 @@
 """Tests for Feishu watch auth helpers."""
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
+
+import httpx
+import pytest
 
 from openviking.resource import feishu_watch_auth
 from openviking.resource.feishu_watch_auth import (
@@ -56,6 +60,58 @@ def test_feishu_auth_state_refresh_window():
         "expires_at": (now + timedelta(minutes=4)).isoformat(),
     }
     assert feishu_auth_state_needs_refresh(near_expiry, now=now) is True
+
+
+@pytest.mark.parametrize(
+    ("domain", "token_url"),
+    [
+        ("https://open.feishu.cn", "https://accounts.feishu.cn/oauth/v3/token"),
+        ("https://open.larksuite.com", "https://accounts.larksuite.com/oauth/v3/token"),
+    ],
+)
+def test_refresh_user_token_uses_oauth_v3_and_rotates_refresh_token(
+    monkeypatch, domain, token_url
+):
+    def fake_post(url, *, data, timeout):
+        assert url == token_url
+        assert data == {
+            "grant_type": "refresh_token",
+            "client_id": "cli-test",
+            "client_secret": "secret-test",
+            "refresh_token": "r-old",
+        }
+        assert timeout == 12
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "u-new",
+                "refresh_token": "r-new",
+                "expires_in": 7200,
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = FeishuOAuthClient(
+        FeishuAppCredentials(
+            app_id="cli-test",
+            app_secret="secret-test",
+            domain=domain,
+            request_timeout=12,
+        )
+    )
+    legacy_client = MagicMock()
+    legacy_client.authen.v1.refresh_access_token.create.side_effect = AssertionError(
+        "legacy authen/v1 refresh endpoint must not be used"
+    )
+    monkeypatch.setattr(client, "_get_client", lambda: legacy_client)
+
+    refreshed = client._refresh_user_access_token_sync("r-old")
+
+    assert refreshed == FeishuRefreshedToken(
+        access_token="u-new",
+        refresh_token="r-new",
+        expires_in=7200,
+    )
 
 
 def test_get_tenant_access_token_uses_configured_app(monkeypatch):
