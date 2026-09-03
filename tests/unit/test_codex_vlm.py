@@ -10,6 +10,9 @@ import pytest
 
 from openviking.models.vlm.backends import codex_auth
 from openviking.models.vlm.backends.codex_auth import resolve_codex_runtime_credentials
+from openviking.models.vlm.backends.codex_responses_adapter import (
+    _convert_message_for_responses,
+)
 from openviking.models.vlm.backends.codex_vlm import CodexVLM
 from openviking_cli.utils.config.vlm_config import VLMConfig
 
@@ -565,6 +568,37 @@ def test_codex_translates_tool_history_into_responses_input(mock_resolve, mock_o
             "call_id": "call_1",
             "output": '{"temperature":72}',
         },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_output"),
+    [
+        (
+            [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second"},
+            ],
+            "firstsecond",
+        ),
+        ({"ok": True}, '{"ok": true}'),
+    ],
+)
+def test_codex_preserves_legacy_text_tool_output_serialization(content, expected_output):
+    converted = _convert_message_for_responses(
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": content,
+        }
+    )
+
+    assert converted == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": expected_output,
+        }
     ]
 
 
