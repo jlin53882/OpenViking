@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Tests for Feishu watch auth helpers."""
 
+import builtins
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -120,7 +122,18 @@ def test_refresh_user_token_keeps_legacy_endpoint_for_ur_tokens(monkeypatch):
     response.data.expires_in = 7200
     legacy_client = MagicMock()
     legacy_client.authen.v1.refresh_access_token.create.return_value = response
+    legacy_authen = SimpleNamespace(
+        CreateRefreshAccessTokenRequest=MagicMock(),
+        CreateRefreshAccessTokenRequestBody=MagicMock(),
+    )
+    real_import = builtins.__import__
 
+    def fake_import(name, *args, **kwargs):
+        if name == "lark_oapi.api.authen.v1":
+            return legacy_authen
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
     monkeypatch.setattr(
         httpx,
         "post",
