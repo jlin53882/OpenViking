@@ -1271,6 +1271,23 @@ class ContentWriteCoordinator:
                 ctx=ctx,
                 ingest_options=ingest_options,
             )
+            # Trigger semantic processing to generate L0 directory abstracts.
+            # _write_direct_with_refresh does this for resources/skills but
+            # _write_memory_with_refresh historically skipped it, causing
+            # memory directories to never get .abstract.md generated.
+            semantic_action = None
+            try:
+                semantic_action = await self._enqueue_semantic_refresh_changes(
+                    root_uri=root_uri,
+                    context_type="memory",
+                    changes={"added": [uri]},
+                    ctx=ctx,
+                    force_refresh=wait,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Memory semantic refresh enqueue skipped for %s: %s", root_uri, exc
+                )
             queue_status = None
             if embedding_requested and wait:
                 queue_status = (
@@ -1291,7 +1308,7 @@ class ContentWriteCoordinator:
                 written_bytes=written_bytes,
                 wait=wait,
                 queue_status=queue_status,
-                semantic_status="skipped",
+                semantic_status="complete" if semantic_action else "skipped",
                 vector_status=vector_status,
                 overview_status="complete" if overview_refreshed else "skipped",
             )
