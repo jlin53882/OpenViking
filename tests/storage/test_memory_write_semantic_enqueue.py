@@ -459,6 +459,53 @@ class TestBatchSemanticEnqueue:
                 assert len(call_kwargs["changes"]["added"]) == 2
 
     @pytest.mark.asyncio
+    async def test_refresh_batch_passes_through_refresh_kinds(self):
+        """Batch memory branch should group URIs by refresh_kinds, not hardcode 'added'.
+
+        Regression test for #4657 review #1: batch replace/append on existing
+        memory files must reach semantic_dag.py classified as 'modified', not 'added'.
+        """
+        inst = _make_instance()
+        inst._viking_fs = AsyncMock()
+        inst._vikingdb = AsyncMock()
+        ctx = _make_ctx()
+
+        with patch("openviking.storage.content_write.MemoryUpdater") as mock_mu:
+            mock_mu.refresh_schema_overview = AsyncMock(return_value=True)
+            mock_mu.refresh_file_embedding = AsyncMock(return_value=True)
+            mock_mu.memory_type_from_uri.return_value = "event"
+
+            with patch.object(inst, "_enqueue_semantic_refresh_changes", new_callable=AsyncMock) as mock_enqueue:
+                mock_enqueue.return_value = FreshnessAction.REFRESH_NOW
+
+                # Mix of added (new file) and modified (existing file rewritten)
+                refresh_kinds = {
+                    "viking://user/home/memories/events/test1.md": "added",
+                    "viking://user/home/memories/events/test2.md": "modified",
+                    "viking://user/home/memories/events/test3.md": "modified",
+                }
+
+                outcome = await inst._refresh_batch(
+                    refresh_kinds=refresh_kinds,
+                    ctx=ctx,
+                    wait=False,
+                    timeout=None,
+                    telemetry_id="test-tel",
+                )
+
+                mock_enqueue.assert_called_once()
+                call_kwargs = mock_enqueue.call_args.kwargs
+                assert call_kwargs["context_type"] == "memory"
+                # Changes dict must have both keys, not just "added"
+                assert "added" in call_kwargs["changes"]
+                assert "modified" in call_kwargs["changes"]
+                assert call_kwargs["changes"]["added"] == ["viking://user/home/memories/events/test1.md"]
+                assert sorted(call_kwargs["changes"]["modified"]) == [
+                    "viking://user/home/memories/events/test2.md",
+                    "viking://user/home/memories/events/test3.md",
+                ]
+
+    @pytest.mark.asyncio
     async def test_refresh_batch_enqueue_failure_does_not_block(self):
         """Semantic enqueue failure in batch should not block the batch operation."""
         inst = _make_instance()

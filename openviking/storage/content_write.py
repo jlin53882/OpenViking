@@ -549,11 +549,16 @@ class ContentWriteCoordinator:
             # Trigger semantic processing for memory directories (#4657 review).
             # Without this, batch writes to memory files would not generate
             # L0 directory abstracts — same root cause as the single-write fix.
+            # Pass through refresh_kinds so semantic_dag.py classifies paths
+            # correctly: added vs modified affects DAG treatment (#4657 review #1).
+            changes_by_type: dict[str, list[str]] = defaultdict(list)
+            for uri in uris:
+                changes_by_type[refresh_kinds[uri]].append(uri)
             try:
                 action = await self._enqueue_semantic_refresh_changes(
                     root_uri=directory_uri,
                     context_type="memory",
-                    changes={"added": list(uris)},
+                    changes=dict(changes_by_type),
                     ctx=ctx,
                     force_refresh=wait,
                 )
@@ -667,7 +672,20 @@ class ContentWriteCoordinator:
     def _map_semantic_status(
         semantic_action: "FreshnessAction | None", *, wait: bool
     ) -> str:
-        """Map a FreshnessAction to a human-readable semantic_status string."""
+        """Map a FreshnessAction to a human-readable semantic_status string.
+
+        Note on the deduplicated + wait=True case (see #4657 review #2):
+        When SemanticQueue.enqueue returns "deduplicated" (45s dedupe window,
+        #769), _enqueue_semantic_refresh_changes returns the planner's action
+        without registering a root. If the planner returned REFRESH_NOW and
+        wait=True, this maps to "complete" — even though no worker is
+        processing *this* request's semantic job. This is acceptable because
+        (a) the earlier write's job covers the same directory, and
+        (b) _process_memory_directory re-lists the whole directory anyway.
+        A future follow-up could add a "deduplicated" status string for
+        full self-description, but the current mapping is honest enough
+        for the write result contract.
+        """
         if semantic_action is None:
             return "skipped"
         if semantic_action is FreshnessAction.REFRESH_NOW:
