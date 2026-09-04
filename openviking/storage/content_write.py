@@ -546,6 +546,25 @@ class ContentWriteCoordinator:
                     strict=True,
                 )
                 embedding_requested = embedding_requested or requested
+            # Trigger semantic processing for memory directories (#4657 review).
+            # Without this, batch writes to memory files would not generate
+            # L0 directory abstracts — same root cause as the single-write fix.
+            try:
+                action = await self._enqueue_semantic_refresh_changes(
+                    root_uri=directory_uri,
+                    context_type="memory",
+                    changes={"added": list(uris)},
+                    ctx=ctx,
+                    force_refresh=wait,
+                )
+                if action:
+                    semantic_actions.append(action)
+            except Exception as exc:
+                logger.debug(
+                    "Batch memory semantic refresh enqueue skipped for %s: %s",
+                    directory_uri,
+                    exc,
+                )
 
         if not wait or (not resource_groups and not embedding_requested):
             return _BatchRefreshOutcome(
@@ -626,14 +645,22 @@ class ContentWriteCoordinator:
             generation_trigger="content_write",
             aggregate_directory=aggregate_directory,
         )
-        if msg.telemetry_id:
-            get_request_wait_tracker().register_semantic_root(msg.telemetry_id, msg.id)
+        # Register AFTER enqueue to avoid phantom roots when dedup occurs.
+        # SemanticQueue.enqueue returns "deduplicated" for memory writes within
+        # the 45s dedupe window (#769). If we registered before enqueue, a
+        # deduplicated msg.id would sit in pending_semantic_roots forever,
+        # causing _wait_for_request to hang until timeout (#4657 review).
         try:
-            await semantic_queue.enqueue(msg)
+            enqueue_result = await semantic_queue.enqueue(msg)
         except Exception as exc:
             if msg.telemetry_id:
                 get_request_wait_tracker().mark_semantic_failed(msg.telemetry_id, msg.id, str(exc))
             raise
+        if enqueue_result == "deduplicated":
+            # Deduplicated — no worker will process this message, so skip registration.
+            return decision.action
+        if msg.telemetry_id:
+            get_request_wait_tracker().register_semantic_root(msg.telemetry_id, msg.id)
         return decision.action
 
     @staticmethod

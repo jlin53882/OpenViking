@@ -340,3 +340,150 @@ class TestSemanticStatusIntegration:
                         )
                         call_kwargs = mock_build.call_args.kwargs
                         assert call_kwargs.get("semantic_status") == "skipped"
+
+
+# ── Fix #2: dedupe + wait=True hang tests ────────────────────────────────
+
+
+class TestDeduplicateHandling:
+    """Verify deduplication doesn't create phantom roots that block wait=True."""
+
+    @pytest.mark.asyncio
+    async def test_dedup_does_not_register_root(self):
+        """When enqueue returns 'deduplicated', register_semantic_root should NOT be called."""
+        inst = _make_instance()
+        inst._viking_fs = AsyncMock()
+        inst._viking_fs._uri_to_path.return_value = "C:/fake/path"
+        inst._viking_fs._async_agfs = AsyncMock()
+        lease = MagicMock()
+        inst._viking_fs._async_agfs.pathlock_acquire_exact = AsyncMock(return_value=lease)
+        inst._viking_fs._async_agfs.pathlock_release = AsyncMock()
+        inst._write_in_place = AsyncMock()
+
+        async def dedup_enqueue(**kwargs):
+            return "deduplicated"
+
+        with patch("openviking.storage.content_write.MemoryUpdater") as mock_mu:
+            mock_mu.refresh_schema_overview = AsyncMock(return_value=True)
+            mock_mu.refresh_file_embedding = AsyncMock(return_value=True)
+            mock_mu.memory_type_from_uri.return_value = "event"
+            with patch.object(inst, "_enqueue_semantic_refresh_changes") as mock_enqueue:
+                mock_enqueue.return_value = FreshnessAction.REFRESH_NOW
+                with patch.object(inst, "_vikingdb_has_queue", return_value=False):
+                    with patch.object(inst, "_build_write_result", return_value={"status": "ok"}):
+                        with patch("openviking.storage.content_write.get_queue_manager") as mock_qm:
+                            mock_queue = AsyncMock()
+                            mock_queue.enqueue = AsyncMock(return_value="deduplicated")
+                            mock_qm.return_value.get_queue.return_value = mock_queue
+                            with patch("openviking.storage.content_write.get_current_telemetry") as mock_tel:
+                                mock_tel.return_value.telemetry_id = "test-tel"
+                                with patch("openviking.storage.content_write.get_request_wait_tracker") as mock_tracker:
+                                    tracker = MagicMock()
+                                    mock_tracker.return_value = tracker
+                                    ctx = _make_ctx()
+                                    action = await inst._enqueue_semantic_refresh_changes(
+                                        root_uri="viking://user/home/memories/events",
+                                        context_type="memory",
+                                        changes={"added": ["viking://user/home/memories/events/test.md"]},
+                                        ctx=ctx,
+                                        force_refresh=False,
+                                    )
+                                    tracker.register_semantic_root.assert_not_called()
+                                    tracker.mark_semantic_failed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dedup_returns_action_without_registering(self):
+        """Dedup should still return the FreshnessAction (not raise)."""
+        inst = _make_instance()
+        with patch("openviking.storage.content_write.get_queue_manager") as mock_qm:
+            mock_queue = AsyncMock()
+            mock_queue.enqueue = AsyncMock(return_value="deduplicated")
+            mock_qm.return_value.get_queue.return_value = mock_queue
+            with patch("openviking.storage.content_write.get_current_telemetry") as mock_tel:
+                mock_tel.return_value.telemetry_id = "test-tel"
+                with patch("openviking.storage.content_write.get_request_wait_tracker"):
+                    with patch("openviking.storage.content_write.plan_abstract_overview_refresh") as mock_plan:
+                        mock_plan.return_value = MagicMock(action=FreshnessAction.REFRESH_NOW)
+                        with patch("openviking.storage.content_write.get_openviking_config") as mock_config:
+                            mock_config.return_value.semantic = MagicMock()
+                            ctx = _make_ctx()
+                            action = await inst._enqueue_semantic_refresh_changes(
+                                root_uri="viking://user/home/memories/events",
+                                context_type="memory",
+                                changes={"added": ["test.md"]},
+                                ctx=ctx,
+                                force_refresh=False,
+                            )
+                            assert action == FreshnessAction.REFRESH_NOW
+
+
+# ── Fix #1: batch-write semantic enqueue tests ───────────────────────────
+
+
+class TestBatchSemanticEnqueue:
+    """Verify _refresh_batch triggers semantic enqueue for memory groups."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_batch_calls_enqueue_for_memory(self):
+        """Memory groups in _refresh_batch should call _enqueue_semantic_refresh_changes."""
+        inst = _make_instance()
+        inst._viking_fs = AsyncMock()
+        inst._vikingdb = AsyncMock()
+        ctx = _make_ctx()
+
+        with patch("openviking.storage.content_write.MemoryUpdater") as mock_mu:
+            mock_mu.refresh_schema_overview = AsyncMock(return_value=True)
+            mock_mu.refresh_file_embedding = AsyncMock(return_value=True)
+            mock_mu.memory_type_from_uri.return_value = "event"
+
+            with patch.object(inst, "_enqueue_semantic_refresh_changes", new_callable=AsyncMock) as mock_enqueue:
+                mock_enqueue.return_value = FreshnessAction.REFRESH_NOW
+
+                refresh_kinds = {
+                    "viking://user/home/memories/events/test1.md": "added",
+                    "viking://user/home/memories/events/test2.md": "added",
+                }
+
+                outcome = await inst._refresh_batch(
+                    refresh_kinds=refresh_kinds,
+                    ctx=ctx,
+                    wait=False,
+                    timeout=None,
+                    telemetry_id="test-tel",
+                )
+
+                mock_enqueue.assert_called_once()
+                call_kwargs = mock_enqueue.call_args.kwargs
+                assert call_kwargs["context_type"] == "memory"
+                assert "added" in call_kwargs["changes"]
+                assert len(call_kwargs["changes"]["added"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_refresh_batch_enqueue_failure_does_not_block(self):
+        """Semantic enqueue failure in batch should not block the batch operation."""
+        inst = _make_instance()
+        inst._viking_fs = AsyncMock()
+        inst._vikingdb = AsyncMock()
+        ctx = _make_ctx()
+
+        with patch("openviking.storage.content_write.MemoryUpdater") as mock_mu:
+            mock_mu.refresh_schema_overview = AsyncMock(return_value=True)
+            mock_mu.refresh_file_embedding = AsyncMock(return_value=True)
+            mock_mu.memory_type_from_uri.return_value = "event"
+
+            with patch.object(inst, "_enqueue_semantic_refresh_changes", new_callable=AsyncMock) as mock_enqueue:
+                mock_enqueue.side_effect = RuntimeError("QueueManager not available")
+
+                refresh_kinds = {
+                    "viking://user/home/memories/events/test1.md": "added",
+                }
+
+                outcome = await inst._refresh_batch(
+                    refresh_kinds=refresh_kinds,
+                    ctx=ctx,
+                    wait=False,
+                    timeout=None,
+                    telemetry_id="test-tel",
+                )
+
+                assert outcome is not None
