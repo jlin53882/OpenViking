@@ -637,6 +637,20 @@ class ContentWriteCoordinator:
         return decision.action
 
     @staticmethod
+    def _map_semantic_status(
+        semantic_action: "FreshnessAction | None", *, wait: bool
+    ) -> str:
+        """Map a FreshnessAction to a human-readable semantic_status string."""
+        if semantic_action is None:
+            return "skipped"
+        if semantic_action is FreshnessAction.REFRESH_NOW:
+            return "complete" if wait else "queued"
+        if semantic_action is FreshnessAction.MARK_PENDING:
+            return "deferred"
+        # NOOP or any other action
+        return "skipped"
+
+    @staticmethod
     def _raise_refresh_errors(queue_status: Dict[str, Any]) -> None:
         for name in ("Semantic", "Embedding"):
             status = queue_status.get(name, {}) if isinstance(queue_status, dict) else {}
@@ -1277,10 +1291,12 @@ class ContentWriteCoordinator:
             # memory directories to never get .abstract.md generated.
             semantic_action = None
             try:
+                # Use "modified" for replace/append, "added" for create (#4657 review)
+                change_type = "added" if mode == "create" else "modified"
                 semantic_action = await self._enqueue_semantic_refresh_changes(
                     root_uri=root_uri,
                     context_type="memory",
-                    changes={"added": [uri]},
+                    changes={change_type: [uri]},
                     ctx=ctx,
                     force_refresh=wait,
                 )
@@ -1308,7 +1324,7 @@ class ContentWriteCoordinator:
                 written_bytes=written_bytes,
                 wait=wait,
                 queue_status=queue_status,
-                semantic_status="complete" if semantic_action else "skipped",
+                semantic_status=self._map_semantic_status(semantic_action, wait=wait),
                 vector_status=vector_status,
                 overview_status="complete" if overview_refreshed else "skipped",
             )

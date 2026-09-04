@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openviking.storage.content_write import ContentWriteCoordinator
+from openviking.storage.queuefs.semantic_ops.freshness_policy import FreshnessAction
 
 
 def _make_instance() -> ContentWriteCoordinator:
@@ -21,6 +22,52 @@ def _make_instance() -> ContentWriteCoordinator:
     inst._vikingdb = None
     inst._viking_fs = None
     return inst
+
+
+def _make_ctx():
+    """Create a mock RequestContext."""
+    ctx = MagicMock()
+    ctx.account_id = "default"
+    ctx.user.user_id = "home"
+    return ctx
+
+
+async def _run_write_with_capture(inst, *, mode="create", wait=False):
+    """Run _write_memory_with_refresh and capture _enqueue_semantic_refresh_changes args."""
+    inst._viking_fs = AsyncMock()
+    inst._viking_fs._uri_to_path.return_value = "C:/fake/path"
+    inst._viking_fs._async_agfs = AsyncMock()
+    lease = MagicMock()
+    inst._viking_fs._async_agfs.pathlock_acquire_exact = AsyncMock(return_value=lease)
+    inst._viking_fs._async_agfs.pathlock_release = AsyncMock()
+    inst._write_in_place = AsyncMock()
+
+    captured_kwargs = {}
+
+    async def capture_enqueue(**kwargs):
+        captured_kwargs.update(kwargs)
+        return FreshnessAction.REFRESH_NOW
+
+    with patch("openviking.storage.content_write.MemoryUpdater") as mock_mu:
+        mock_mu.refresh_schema_overview = AsyncMock(return_value=True)
+        mock_mu.refresh_file_embedding = AsyncMock(return_value=True)
+        mock_mu.memory_type_from_uri.return_value = "event"
+
+        with patch.object(inst, "_enqueue_semantic_refresh_changes", side_effect=capture_enqueue):
+            with patch.object(inst, "_vikingdb_has_queue", return_value=False):
+                with patch.object(inst, "_build_write_result", return_value={"status": "ok"}):
+                    result = await inst._write_memory_with_refresh(
+                        uri="viking://user/home/memories/events/mem_test.md",
+                        root_uri="viking://user/home/memories/events",
+                        content="test content",
+                        mode=mode,
+                        wait=wait,
+                        timeout=30.0,
+                        ctx=_make_ctx(),
+                        written_bytes=12,
+                        telemetry_id="test-tel",
+                    )
+    return result, captured_kwargs
 
 
 @pytest.mark.asyncio
@@ -119,3 +166,177 @@ async def test_write_memory_semantic_failure_does_not_block():
                     )
 
                     assert result == {"status": "ok"}
+
+
+# ── Fix #3: semantic_status mapping tests ────────────────────────────────
+
+
+class TestSemanticStatusMapping:
+    """Verify _map_semantic_status correctly maps FreshnessAction to status strings."""
+
+    def test_refresh_now_with_wait_returns_complete(self):
+        assert (
+            ContentWriteCoordinator._map_semantic_status(
+                FreshnessAction.REFRESH_NOW, wait=True
+            )
+            == "complete"
+        )
+
+    def test_refresh_now_without_wait_returns_queued(self):
+        assert (
+            ContentWriteCoordinator._map_semantic_status(
+                FreshnessAction.REFRESH_NOW, wait=False
+            )
+            == "queued"
+        )
+
+    def test_mark_pending_returns_deferred(self):
+        assert (
+            ContentWriteCoordinator._map_semantic_status(
+                FreshnessAction.MARK_PENDING, wait=True
+            )
+            == "deferred"
+        )
+        assert (
+            ContentWriteCoordinator._map_semantic_status(
+                FreshnessAction.MARK_PENDING, wait=False
+            )
+            == "deferred"
+        )
+
+    def test_noop_returns_skipped(self):
+        assert (
+            ContentWriteCoordinator._map_semantic_status(
+                FreshnessAction.NOOP, wait=True
+            )
+            == "skipped"
+        )
+
+    def test_none_returns_skipped(self):
+        assert (
+            ContentWriteCoordinator._map_semantic_status(None, wait=True) == "skipped"
+        )
+
+
+# ── Fix #4: change_type based on mode tests ─────────────────────────────
+
+
+class TestChangeTypeBasedOnMode:
+    """Verify changes dict uses 'added' for create, 'modified' for replace/append."""
+
+    @pytest.mark.asyncio
+    async def test_create_mode_uses_added(self):
+        """Create mode should use 'added' in changes dict."""
+        inst = _make_instance()
+        _, captured = await _run_write_with_capture(inst, mode="create")
+        assert "added" in captured["changes"]
+        assert "modified" not in captured["changes"]
+
+    @pytest.mark.asyncio
+    async def test_replace_mode_uses_modified(self):
+        """Replace mode should use 'modified' in changes dict."""
+        inst = _make_instance()
+        _, captured = await _run_write_with_capture(inst, mode="replace")
+        assert "modified" in captured["changes"]
+        assert "added" not in captured["changes"]
+
+    @pytest.mark.asyncio
+    async def test_append_mode_uses_modified(self):
+        """Append mode should use 'modified' in changes dict."""
+        inst = _make_instance()
+        _, captured = await _run_write_with_capture(inst, mode="append")
+        assert "modified" in captured["changes"]
+        assert "added" not in captured["changes"]
+
+
+# ── Fix #5: semantic_status integration tests ────────────────────────────
+
+
+class TestSemanticStatusIntegration:
+    """Verify _build_write_result receives correct semantic_status."""
+
+    @pytest.mark.asyncio
+    async def test_semantic_status_complete_when_refresh_now_wait(self):
+        """REFRESH_NOW + wait=True -> semantic_status='complete'."""
+        inst = _make_instance()
+        await _run_write_with_capture(inst, mode="create", wait=True)
+
+    @pytest.mark.asyncio
+    async def test_semantic_status_queued_when_refresh_now_no_wait(self):
+        """REFRESH_NOW + wait=False -> semantic_status='queued'."""
+        inst = _make_instance()
+        await _run_write_with_capture(inst, mode="create", wait=False)
+
+    @pytest.mark.asyncio
+    async def test_semantic_status_skipped_when_noop(self):
+        """NOOP -> semantic_status='skipped'."""
+        inst = _make_instance()
+        inst._viking_fs = AsyncMock()
+        inst._viking_fs._uri_to_path.return_value = "C:/fake/path"
+        inst._viking_fs._async_agfs = AsyncMock()
+        lease = MagicMock()
+        inst._viking_fs._async_agfs.pathlock_acquire_exact = AsyncMock(return_value=lease)
+        inst._viking_fs._async_agfs.pathlock_release = AsyncMock()
+        inst._write_in_place = AsyncMock()
+
+        async def noop_enqueue(**kwargs):
+            return FreshnessAction.NOOP
+
+        with patch("openviking.storage.content_write.MemoryUpdater") as mock_mu:
+            mock_mu.refresh_schema_overview = AsyncMock(return_value=True)
+            mock_mu.refresh_file_embedding = AsyncMock(return_value=True)
+            mock_mu.memory_type_from_uri.return_value = "event"
+            with patch.object(inst, "_enqueue_semantic_refresh_changes", side_effect=noop_enqueue):
+                with patch.object(inst, "_vikingdb_has_queue", return_value=False):
+                    mock_build = MagicMock(return_value={"status": "ok"})
+                    with patch.object(inst, "_build_write_result", mock_build):
+                        await inst._write_memory_with_refresh(
+                            uri="viking://user/home/memories/events/mem_test.md",
+                            root_uri="viking://user/home/memories/events",
+                            content="test",
+                            mode="create",
+                            wait=False,
+                            timeout=30.0,
+                            ctx=_make_ctx(),
+                            written_bytes=4,
+                            telemetry_id="test-tel",
+                        )
+                        call_kwargs = mock_build.call_args.kwargs
+                        assert call_kwargs.get("semantic_status") == "skipped"
+
+    @pytest.mark.asyncio
+    async def test_semantic_status_skipped_when_none(self):
+        """None (enqueue raised) -> semantic_status='skipped'."""
+        inst = _make_instance()
+        inst._viking_fs = AsyncMock()
+        inst._viking_fs._uri_to_path.return_value = "C:/fake/path"
+        inst._viking_fs._async_agfs = AsyncMock()
+        lease = MagicMock()
+        inst._viking_fs._async_agfs.pathlock_acquire_exact = AsyncMock(return_value=lease)
+        inst._viking_fs._async_agfs.pathlock_release = AsyncMock()
+        inst._write_in_place = AsyncMock()
+
+        async def failing_enqueue(**kwargs):
+            raise RuntimeError("QueueManager not available")
+
+        with patch("openviking.storage.content_write.MemoryUpdater") as mock_mu:
+            mock_mu.refresh_schema_overview = AsyncMock(return_value=True)
+            mock_mu.refresh_file_embedding = AsyncMock(return_value=True)
+            mock_mu.memory_type_from_uri.return_value = "event"
+            with patch.object(inst, "_enqueue_semantic_refresh_changes", side_effect=failing_enqueue):
+                with patch.object(inst, "_vikingdb_has_queue", return_value=False):
+                    mock_build = MagicMock(return_value={"status": "ok"})
+                    with patch.object(inst, "_build_write_result", mock_build):
+                        await inst._write_memory_with_refresh(
+                            uri="viking://user/home/memories/events/mem_test.md",
+                            root_uri="viking://user/home/memories/events",
+                            content="test",
+                            mode="create",
+                            wait=False,
+                            timeout=30.0,
+                            ctx=_make_ctx(),
+                            written_bytes=4,
+                            telemetry_id="test-tel",
+                        )
+                        call_kwargs = mock_build.call_args.kwargs
+                        assert call_kwargs.get("semantic_status") == "skipped"
